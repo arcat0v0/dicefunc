@@ -1,0 +1,20 @@
+schemaVersion: 1
+runtime:
+  level: info
+  allowProductionDebug: false
+  maxEntryBytes: 8192
+  normalEventSampleRate: 1
+story:
+  enabledByDefault: false
+  archiveRetentionDays: null
+  stagingPurgeAfterVerifiedHours: 24
+  archiveLagWarningSeconds: 60
+  archiveLagPauseSeconds: 900
+  stagingMaxBytesPerConversation: 8388608
+  shareLinksEnabled: false
+  grantTtlSeconds: 900
+  auditRetentionDays: 90
+  deleteConfirmationTtlSeconds: 300
+execution:
+  resultRetentionDays: 7
+  dedupRetentionDays: 30

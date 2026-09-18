@@ -1,0 +1,26 @@
+{
+  "name": "dicefunc",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "check": "biome check --write .",
+    "test:unit": "vitest run",
+    "test:integration": "vitest run tests/integration/",
+    "test:runtime": "vitest run tests/runtime/",
+    "dev:worker": "wrangler dev",
+    "deploy:worker": "wrangler deploy",
+    "cli": "pnpm run --filter=dice func"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "@cloudflare/vitest-pool-workers": "^0.5.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^7.0.0",
+    "vitest": "^2.0.0",
+    "wrangler": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

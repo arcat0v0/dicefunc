@@ -1,0 +1,6 @@
+schemaVersion: 1
+id: gothic
+extends: classic
+displayName: 古典怪谈风格
+files:
+  - replies/coc7.yaml

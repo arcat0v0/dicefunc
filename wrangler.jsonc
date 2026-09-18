@@ -1,0 +1,74 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dicefunc-worker",
+  "main": "apps/worker/src/index.ts",
+  "compatibilityDate": "2026-09-18",
+  "compatibilityFlags": ["nodejs_compat"],
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "level": 2
+    }
+  },
+  "vars": {
+    "ENVIRONMENT": "development"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "dicefunc-db",
+      "database_id": "",
+      "preview_database_id": ""
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "CONFIG_KV",
+      "id": "",
+      "preview_id": ""
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "STORY_LOG_BUCKET",
+      "bucket_name": "dicefunc-story-logs",
+      "preview_bucket_name": ""
+    },
+    {
+      "binding": "CONFIG_BUCKET",
+      "bucket_name": "dicefunc-config",
+      "preview_bucket_name": ""
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "COMMAND_QUEUE",
+        "queue": "command-queue"
+      },
+      {
+        "binding": "ARCHIVE_QUEUE",
+        "queue": "archive-queue"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "command-queue",
+        "max_batch_size": 10,
+        "max_concurrency": 2,
+        "max_retries": 3,
+        "deadLetterQueue": "command-dlq"
+      },
+      {
+        "queue": "archive-queue",
+        "max_batch_size": 5,
+        "max_concurrency": 1,
+        "max_retries": 5,
+        "deadLetterQueue": "archive-dlq"
+      }
+    ]
+  },
+  "build": {
+    "command": "pnpm build"
+  }
+}

@@ -1,0 +1,16 @@
+schemaVersion: 1
+bot:
+  id: investigator
+  displayName: 守秘海豹
+qq:
+  appId: "YOUR_QQ_APP_ID"
+  appSecretBinding: QQ_APP_SECRET
+  scenes: [groupAt, c2c]
+defaults:
+  ruleSet: coc7
+  diceSides: 100
+  flavor: gothic
+  timezone: Asia/Shanghai
+modules: [core, character, coc7, deck, customReply, storyLog]
+configSource:
+  mode: bundled

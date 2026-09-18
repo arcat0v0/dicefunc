@@ -1,0 +1,13 @@
+schemaVersion: 1
+group:
+  id: example-group
+  name: 示例跑团群
+settings:
+  ruleSet: coc7
+  diceSides: 100
+  timezone: Asia/Shanghai
+  enabled: true
+overrides: {}
+permissions:
+  allowCharacterSharing: false
+  maxDiceRolls: 1000

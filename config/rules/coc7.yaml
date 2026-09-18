@@ -1,0 +1,41 @@
+schemaVersion: 1
+ruleSet: coc7
+houseRules:
+  baseDifficulty: 1
+  difficultyModifiers:
+    easy: 0.5
+    hard: 2
+    extreme: 5
+  dgModifier: -10
+  maxRollForSuccess: 99
+  sanityLossMultiplier: 1
+aliases:
+  skills:
+    awareness: 洞察
+    credit_rating: 财力
+    cryptography: 密码学
+    driving: 驾驶
+    ecology: 生态学
+    education: 教育学
+    forensics: 法医学
+    history: 历史
+    law: 法律
+    literature: 文学
+    medicine: 医学
+    natural_science: 自然科学
+    perception: 感知
+    psychology: 心理学
+    stealth: 隐匿
+    mathematics: 数学
+    computer: 计算机
+    modern_language: 现代语言
+attributes:
+  strength: 力量
+  constitution: 体质
+  size: 体型
+  intelligence: 智力
+  power: 意志
+  dexterity: 敏捷
+  appearance: 外貌
+  education: 教育
+  luck: 幸运

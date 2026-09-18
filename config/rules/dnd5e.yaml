@@ -1,0 +1,36 @@
+schemaVersion: 1
+ruleSet: dnd5e
+aliases:
+  abilities:
+    strength: 力量
+    dexterity: 敏捷
+    constitution: 体质
+    intelligence: 智力
+    wisdom: 感知
+    charisma: 魅力
+  saving_throws:
+    str: 力量豁免
+    dex: 敏捷豁免
+    con: 体质豁免
+    int: 智力豁免
+    wis: 感知豁免
+    cha: 魅力豁免
+  skills:
+    acrobatics: 特技
+    animal_handling: 驯兽
+    arcana: 奥术
+    athletics: 运动
+    deception: 欺瞒
+    history: 历史
+    insight: 洞悉
+    intimidation: 威吓
+    investigation: 调查
+    medicine: 医疗
+    nature: 自然
+    perception: 察觉
+    performance: 表演
+    persuasion: 游说
+    religion: 宗教
+    sleight_of_hand: 巧手
+    stealth: 隐匿
+    survival: 生存

@@ -1,0 +1,27 @@
+schemaVersion: 1
+templates:
+  coc.check.success:
+    variants:
+      - id: standard
+        weight: 3
+        text: |
+          {{actor.name}}的{{skill.name}}检定成功！
+          出目：{{roll.total}} / 目标值：{{target.value}}
+      - id: critical
+        weight: 1
+        text: |
+          {{actor.name}}掷出了大成功！
+          {{skill.name}}：{{roll.total}} / {{target.value}}
+  
+  coc.check.failure:
+    variants:
+      - id: standard
+        weight: 3
+        text: |
+          {{actor.name}}的{{skill.name}}检定失败。
+          出目：{{roll.total}} / 目标值：{{target.value}}
+      - id: extreme_failure
+        weight: 1
+        text: |
+          {{actor.name}}掷出了大失败...
+          {{skill.name}}：{{roll.total}} / {{target.value}}

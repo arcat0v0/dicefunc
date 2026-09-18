@@ -1,0 +1,7 @@
+schemaVersion: 1
+diceMaster:
+  principals: []
+groupHosts: []
+denyList: []
+allowedFields:
+  character: [name, description, tags]

@@ -1,0 +1,16 @@
+schemaVersion: 1
+input:
+  maxExpressionBytes: 2048
+  maxAstNodes: 512
+  maxRecursionDepth: 32
+  maxDiceRollsPerCommand: 1000
+  maxRepeatExecutions: 10
+output:
+  maxReplyBytes: 4096
+  maxMessageSegments: 5
+  maxMessagesPerReply: 5
+deck:
+  maxRecursiveDepth: 16
+request:
+  maxBatchSize: 10
+  timeoutMs: 30000

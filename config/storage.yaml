@@ -1,0 +1,18 @@
+schemaVersion: 1
+database:
+  provider: cloudflare-d1
+  binding: DB
+configuration:
+  cacheBinding: CONFIG_KV
+  bucketBinding: CONFIG_BUCKET
+jobs:
+  commandQueueBinding: COMMAND_QUEUE
+  archiveQueueBinding: ARCHIVE_QUEUE
+storyLog:
+  archive:
+    provider: cloudflare-r2
+    bucketBinding: STORY_LOG_BUCKET
+    prefix: dicefunc/investigator/logs/
+    formats: [txt, json]
+    visibility: private
+    maxExportBytes: 4194304
