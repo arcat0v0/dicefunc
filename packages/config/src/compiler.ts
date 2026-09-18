@@ -1,11 +1,6 @@
 import * as yaml from 'js-yaml';
 import { load } from 'js-yaml';
 
-export interface ConfigCompilerOptions {
-  strict?: boolean;
-  allowUnknownFields?: boolean;
-}
-
 export interface CompiledConfig {
   readonly schemaVersion: number;
   readonly data: Record<string, unknown>;
@@ -13,17 +8,7 @@ export interface CompiledConfig {
 }
 
 export class ConfigCompiler {
-  private options: ConfigCompilerOptions;
-  
-  constructor(options?: ConfigCompilerOptions) {
-    this.options = {
-      strict: true,
-      allowUnknownFields: false,
-      ...options
-    };
-  }
-  
-  compile(filePath: string, content: string): CompiledConfig {
+  async compile(filePath: string, content: string): Promise<CompiledConfig> {
     // Parse YAML
     let data: unknown;
     
@@ -51,7 +36,7 @@ export class ConfigCompiler {
     }
     
     // Calculate digest
-    const digest = this.calculateDigest(content);
+    const digest = await this.calculateDigest(content);
     
     return {
       schemaVersion: configData.schemaVersion,
@@ -60,40 +45,35 @@ export class ConfigCompiler {
     };
   }
   
-  private calculateDigest(content: string): string {
+  private async calculateDigest(content: string): Promise<string> {
     const encoder = new TextEncoder();
     const data = encoder.encode(content);
-    
-    return crypto.subtle.digest('SHA-256', data)
-      .then(hash => Array.from(new Uint8Array(hash))
-        .map(b => b.toString(16).padStart(2, '0'))
-        .join(''));
+    const hash = await crypto.subtle.digest('SHA-256', data);
+    return Array.from(new Uint8Array(hash))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
   }
-  
-  mergeConfigs(...configs: CompiledConfig[]): CompiledConfig {
+
+  async mergeConfigs(...configs: CompiledConfig[]): Promise<CompiledConfig> {
     if (configs.length === 0) {
       throw new Error('Cannot merge empty configs');
     }
-    
+
     const merged: Record<string, unknown> = {};
     let maxSchemaVersion = 0;
-    
+
     for (const config of configs) {
       if (config.schemaVersion > maxSchemaVersion) {
         maxSchemaVersion = config.schemaVersion;
       }
-      
+
       Object.assign(merged, config.data);
     }
-    
+
     return {
       schemaVersion: maxSchemaVersion,
       data: merged,
-      digest: this.calculateDigest(JSON.stringify(merged))
+      digest: await this.calculateDigest(JSON.stringify(merged))
     };
   }
-}
-
-export function createConfigCompiler(options?: ConfigCompilerOptions): ConfigCompiler {
-  return new ConfigCompiler(options);
 }

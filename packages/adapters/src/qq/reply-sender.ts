@@ -1,152 +1,172 @@
-import {
-  ReplySender,
-  PreparedReply,
+import type {
+  Clock,
   DeliveryOutcome,
-  DeliveryStatus,
-  SceneType
-} from '../../core/src/ports/reply-sender';
+  PreparedReply,
+  ReplySender,
+  RuntimeLogger,
+} from '@dicefunc/core';
+import { buildLogEntry, systemClock } from '@dicefunc/core';
+import type { QQTokenProvider } from './token-provider.js';
+
+export interface QQReplySenderOptions {
+  readonly tokenProvider: QQTokenProvider;
+  readonly baseUrl?: string;
+  readonly httpClient?: (url: string, init: RequestInit) => Promise<Response>;
+  readonly clock?: Clock;
+  readonly logger?: RuntimeLogger;
+  readonly environment?: string;
+}
 
 export class QQReplySender implements ReplySender {
-  constructor(
-    private appId: string,
-    private appSecret: string,
-    private baseUrl: string = 'https://bot.q.qq.com'
-  ) {}
+  private readonly tokenProvider: QQTokenProvider;
+  private readonly baseUrl: string;
+  private readonly httpClient: (url: string, init: RequestInit) => Promise<Response>;
+  private readonly clock: Clock;
+  private readonly logger: RuntimeLogger | undefined;
+  private readonly environment: string;
 
-  async send(message: PreparedReply): Promise<DeliveryOutcome> {
+  constructor(options: QQReplySenderOptions) {
+    this.tokenProvider = options.tokenProvider;
+    this.baseUrl = (options.baseUrl ?? 'https://api.sgroup.qq.com').replace(/\/+$/, '');
+    this.httpClient = options.httpClient ?? globalThis.fetch.bind(globalThis);
+    this.clock = options.clock ?? systemClock;
+    this.logger = options.logger;
+    this.environment = options.environment ?? 'production';
+  }
+
+  async send(reply: PreparedReply): Promise<DeliveryOutcome> {
+    if (this.clock.now().getTime() > reply.deadline.getTime()) {
+      return { status: 'expired' };
+    }
+
+    const url =
+      reply.scene === 'c2c'
+        ? `${this.baseUrl}/v2/users/${encodeURIComponent(reply.targetId)}/messages`
+        : `${this.baseUrl}/v2/groups/${encodeURIComponent(reply.targetId)}/messages`;
+
+    const payload = {
+      content: reply.text,
+      msg_type: 0,
+      msg_id: reply.originMessageId,
+      msg_seq: reply.msgSeq,
+    };
+
+    return await this.sendAttempt(url, payload, reply, false);
+  }
+
+  private async sendAttempt(
+    url: string,
+    payload: { content: string; msg_type: number; msg_id: string; msg_seq: number },
+    reply: PreparedReply,
+    hasRetriedAuth: boolean,
+  ): Promise<DeliveryOutcome> {
+    let token: string;
     try {
-      const url = this.buildReplyUrl(message.recipient);
-      
-      const payload = this.buildPayload(message);
-      
-      const response = await fetch(url, {
+      token = await this.tokenProvider.getAccessToken(hasRetriedAuth);
+    } catch {
+      if (this.clock.now().getTime() > reply.deadline.getTime()) {
+        return { status: 'expired' };
+      }
+      return { status: 'retryable', errorCode: 'TOKEN_FETCH_ERROR' };
+    }
+
+    let response: Response;
+    try {
+      response = await this.httpClient(url, {
         method: 'POST',
         headers: {
-          'Authorization': `QQBot ${this.appId}`,
-          'Content-Type': 'application/json'
+          Authorization: `QQBot ${token}`,
+          'Content-Type': 'application/json',
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       });
-      
-      const result = await response.json();
-      
-      if (response.ok) {
-        return {
-          success: true,
-          platformMessageId: result.id || result.message_id,
-          status: 'sent',
-          sentAt: new Date()
-        };
-      } else {
-        return {
-          success: false,
-          status: 'failed' as DeliveryStatus,
-          error: {
-            code: result.code?.toString() || 'QQ_ERROR',
-            message: result.message || 'QQ API error',
-            retryable: isRetryableError(result.code)
-          }
-        };
+    } catch {
+      if (this.clock.now().getTime() > reply.deadline.getTime()) {
+        return { status: 'expired' };
       }
-      
-    } catch (error) {
+      return { status: 'retryable', errorCode: 'NETWORK_ERROR' };
+    }
+
+    if (response.status === 200 || response.status === 201) {
+      const data = (await response.json().catch(() => ({}))) as { id?: string };
+      const platformMessageId = typeof data.id === 'string' ? data.id : '';
+      if (this.logger) {
+        this.logger.log(
+          buildLogEntry({
+            level: 'info',
+            event: 'qq.reply.sent',
+            component: 'reply-sender',
+            environment: this.environment,
+            executionId: reply.executionId,
+            outcome: 'sent',
+            httpStatus: response.status,
+          }),
+        );
+      }
       return {
-        success: false,
-        status: 'unknown' as DeliveryStatus,
-        error: {
-          code: 'NETWORK_ERROR',
-          message: error instanceof Error ? error.message : 'Unknown error',
-          retryable: true
-        }
+        status: 'sent',
+        platformMessageId,
       };
     }
-  }
 
-  async sendBatch(messages: PreparedReply[]): Promise<DeliveryOutcome[]> {
-    const outcomes: DeliveryOutcome[] = [];
-    
-    // QQ has rate limits, send in batches
-    const batchSize = 5;
-    for (let i = 0; i < messages.length; i += batchSize) {
-      const batch = messages.slice(i, i + batchSize);
-      
-      const results = await Promise.all(
-        batch.map(msg => this.send(msg))
-      );
-      
-      outcomes.push(...results);
-      
-      // Respect rate limits
-      if (i + batchSize < messages.length) {
-        await delay(1000);
+    if (response.status === 401 && !hasRetriedAuth) {
+      this.tokenProvider.invalidate();
+      if (this.clock.now().getTime() > reply.deadline.getTime()) {
+        return { status: 'expired' };
       }
+      return await this.sendAttempt(url, payload, reply, true);
     }
-    
-    return outcomes;
-  }
 
-  private buildReplyUrl(recipient: { scene: SceneType; externalId: string }): string {
-    const scenePrefix = recipient.scene === 'c2c' ? '' : 'guilds/';
-    const groupId = recipient.externalId;
-    
-    return `${this.baseUrl}/v2/groups/${groupId}/messages`;
-  }
+    if (response.status === 400 || response.status === 403 || response.status === 404) {
+      const errorCode = `HTTP_${response.status}`;
+      if (this.logger) {
+        this.logger.log(
+          buildLogEntry({
+            level: 'error',
+            event: 'qq.reply.failed',
+            component: 'reply-sender',
+            environment: this.environment,
+            executionId: reply.executionId,
+            outcome: 'failed',
+            errorCode,
+            httpStatus: response.status,
+          }),
+        );
+      }
+      return {
+        status: 'failed',
+        errorCode,
+      };
+    }
 
-  private buildPayload(message: PreparedReply): unknown {
-    const content = this.renderContent(message);
-    
-    const replyData = {
-      content,
-      msg_type: 7,
-      seq: message.msgSeq,
-      reference_message_id: message.executionId
+    if (response.status === 429 || response.status >= 500) {
+      if (this.clock.now().getTime() > reply.deadline.getTime()) {
+        return { status: 'expired' };
+      }
+      const errorCode = `HTTP_${response.status}`;
+      if (this.logger) {
+        this.logger.log(
+          buildLogEntry({
+            level: 'warn',
+            event: 'qq.reply.retry',
+            component: 'reply-sender',
+            environment: this.environment,
+            executionId: reply.executionId,
+            outcome: 'retryable',
+            errorCode,
+            httpStatus: response.status,
+          }),
+        );
+      }
+      return {
+        status: 'retryable',
+        errorCode,
+      };
+    }
+
+    return {
+      status: 'failed',
+      errorCode: `HTTP_${response.status}`,
     };
-    
-    return replyData;
   }
-
-  private renderContent(message: PreparedReply): string {
-    switch (message.content.type) {
-      case 'text':
-        return escapeMarkdown(message.content.text);
-        
-      case 'markdown':
-        return convertToMarkdown(message.content.text);
-        
-      default:
-        return escapeMarkdown(message.content.text);
-    }
-  }
-}
-
-function escapeMarkdown(text: string): string {
-  // Escape special Markdown characters for QQ
-  return text
-    .replace(/\\/g, '\\\\')
-    .replace(/\*/g, '\\*')
-    .replace(/_/g, '\\_')
-    .replace(/`/g, '\\`');
-}
-
-function convertToMarkdown(text: string): string {
-  // Convert simple markdown to QQ-compatible format
-  return text
-    .replace(/^### (.*)$/gm, '**$1**')
-    .replace(/^## (.*)$/gm, '**$1**')
-    .replace(/^# (.*)$/gm, '*$1*')
-    .replace(/```(\w*)\n([\s\S]*?)```/g, '$2');
-}
-
-function isRetryableError(code?: number): boolean {
-  // QQ rate limiting codes
-  if (code === 429 || code === 500) {
-    return true;
-  }
-  
-  // Network errors are retryable
-  return true;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }

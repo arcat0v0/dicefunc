@@ -1,109 +1,165 @@
-import { CommandScope, StateSnapshot, CommandCommit, CommitOutcome } from '../ports/state-store';
-import { RandomSource } from '../ports/random-source';
-import { CocCheckResult, performCocCheck } from '../domain/rules/coc7/check';
-import { DiceRollResult, rollDice, createWebCryptoRandomSource } from '../domain/dice/expression';
-import { CharacterSheet } from '../domain/character/sheet';
-import { ConversationSession } from '../domain/session/conversation';
+import type { VerifiedEvent } from '../ports/state-store.js';
+import {
+  type CommandContext,
+  type CommandDecision,
+  type CommandInput,
+  type CommandRegistry,
+  createDefaultCommandRegistry,
+} from './commands.js';
 
-export interface CommandContext {
-  readonly snapshot: StateSnapshot;
-  readonly randomSource: RandomSource;
-  readonly configVersion: string;
-  readonly budget: CommandBudget;
-}
-
-export interface CommandBudget {
-  readonly maxDiceRolls: number;
-  readonly maxRecursionDepth: number;
-  readonly maxOutputBytes: number;
-}
-
-export interface CommandDecision {
-  readonly success: boolean;
-  readonly executionId: string;
-  readonly stateUpdates?: StateUpdate[];
-  readonly results: CommandResult[];
-  readonly errors?: CommandError[];
-}
-
-export interface CommandResult {
-  readonly type: 'coc_check' | 'dice_roll' | 'character_save' | 'deck_draw';
-  readonly data: unknown;
-}
-
-export interface CommandError {
-  readonly code: string;
-  readonly message: string;
-  readonly details?: unknown;
-}
-
-export interface StateUpdate {
-  readonly type: 'conversation' | 'character' | 'binding' | 'policy' | 'deck';
-  readonly id: string;
-  readonly data: unknown;
-  readonly expectedVersion: number;
-}
+export type {
+  CommandBudget,
+  CommandContext,
+  CommandDecision,
+  CommandHandler,
+  CommandInput,
+  CommandMetadata,
+  CommandPermission,
+  CommandRegistry,
+} from './commands.js';
 
 export class CommandExecutor {
-  private readonly randomSource: RandomSource;
-  
-  constructor(randomSource?: RandomSource) {
-    this.randomSource = randomSource || createWebCryptoRandomSource();
+  private readonly registry: CommandRegistry;
+
+  constructor(registry?: CommandRegistry) {
+    this.registry = registry ?? createDefaultCommandRegistry();
   }
-  
-  async execute(
-    scope: CommandScope,
-    context: CommandContext
-  ): Promise<CommandDecision> {
-    const executionId = this.generateExecutionId();
-    
-    try {
-      if (!context.snapshot.conversation) {
-        return {
-          success: false,
-          executionId,
-          results: [],
-          errors: [{
-            code: 'NO_CONVERSATION',
-            message: 'No active conversation found'
-          }]
-        };
+
+  async execute(event: VerifiedEvent, context: CommandContext): Promise<CommandDecision> {
+    const raw = event.text.trim();
+    if (!raw) {
+      return { results: [], updates: [], replies: [], logItems: [] };
+    }
+
+    let textToParse = raw;
+    let explicitPrefix = false;
+
+    if (
+      textToParse.startsWith('.') ||
+      textToParse.startsWith('。') ||
+      textToParse.startsWith('/')
+    ) {
+      textToParse = textToParse.slice(1).trim();
+      explicitPrefix = true;
+    }
+
+    const parts = textToParse.split(/\s+/);
+    const cmdName = parts[0];
+    if (!cmdName) {
+      return { results: [], updates: [], replies: [], logItems: [] };
+    }
+
+    const registered = this.registry.find(cmdName);
+    if (!registered) {
+      if (!explicitPrefix) {
+        return { results: [], updates: [], replies: [], logItems: [] };
       }
-      
+      const deadline = new Date(event.timestamp.getTime() + 300_000);
       return {
-        success: true,
-        executionId,
         results: [],
-        stateUpdates: []
-      };
-    } catch (error) {
-      return {
-        success: false,
-        executionId,
-        results: [],
-        errors: [{
-          code: 'EXECUTION_ERROR',
-          message: error instanceof Error ? error.message : 'Unknown error'
-        }]
+        updates: [],
+        replies: [
+          {
+            executionId: `exec_${event.eventId}`,
+            part: 1,
+            msgSeq: 1,
+            scene: event.scene,
+            targetId: event.externalId,
+            originMessageId: event.messageId,
+            templateKey: 'command.not_found',
+            text: `Command not found: ${cmdName}`,
+            deadline,
+          },
+        ],
+        logItems: [],
       };
     }
-  }
-  
-  private generateExecutionId(): string {
-    return `exec_${Date.now()}_${this.randomSource.integer(1000000, 9999999)}`;
-  }
-}
 
-export function rollSimpleDice(
-  faces: number,
-  count: number,
-  randomSource: RandomSource
-): DiceRollResult {
-  const rolls = rollDice(faces, count, randomSource);
-  return {
-    expression: `${count}d${faces}`,
-    diceFaces: rolls,
-    total: rolls.reduce((sum, n) => sum + n, 0),
-    individualRolls: rolls
-  };
+    const conversation = context.snapshot.conversation;
+    if (!conversation.enabled && !registered.metadata.allowedWhenDisabled) {
+      return { results: [], updates: [], replies: [], logItems: [] };
+    }
+
+    if (context.permissions.denied) {
+      const deadline = new Date(event.timestamp.getTime() + 300_000);
+      return {
+        results: [],
+        updates: [],
+        replies: [
+          {
+            executionId: `exec_${event.eventId}`,
+            part: 1,
+            msgSeq: 1,
+            scene: event.scene,
+            targetId: event.externalId,
+            originMessageId: event.messageId,
+            templateKey: 'permission.denied',
+            text: 'Permission denied.',
+            deadline,
+          },
+        ],
+        logItems: [],
+      };
+    }
+
+    if (registered.metadata.permission === 'diceMaster') {
+      if (!context.permissions.isDiceMaster) {
+        const deadline = new Date(event.timestamp.getTime() + 300_000);
+        return {
+          results: [],
+          updates: [],
+          replies: [
+            {
+              executionId: `exec_${event.eventId}`,
+              part: 1,
+              msgSeq: 1,
+              scene: event.scene,
+              targetId: event.externalId,
+              originMessageId: event.messageId,
+              templateKey: 'permission.dice_master_required',
+              text: 'This command requires Dice Master permission.',
+              deadline,
+            },
+          ],
+          logItems: [],
+        };
+      }
+    } else if (registered.metadata.permission === 'groupHost') {
+      if (!context.permissions.isGroupHost && !context.permissions.isDiceMaster) {
+        const deadline = new Date(event.timestamp.getTime() + 300_000);
+        return {
+          results: [],
+          updates: [],
+          replies: [
+            {
+              executionId: `exec_${event.eventId}`,
+              part: 1,
+              msgSeq: 1,
+              scene: event.scene,
+              targetId: event.externalId,
+              originMessageId: event.messageId,
+              templateKey: 'permission.group_host_required',
+              text: 'This command requires Group Host permission.',
+              deadline,
+            },
+          ],
+          logItems: [],
+        };
+      }
+    }
+
+    const executionId = `exec_${event.eventId}`;
+    const args = parts.slice(1);
+    const input: CommandInput = {
+      executionId,
+      rawText: raw,
+      commandName: cmdName,
+      args,
+      eventId: event.eventId,
+      messageId: event.messageId,
+      timestamp: event.timestamp,
+    };
+
+    return registered.handler(input, context);
+  }
 }

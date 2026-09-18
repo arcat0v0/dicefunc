@@ -1,38 +1,73 @@
-import { Hono } from 'hono';
-import { handleWebhook } from './http';
-import { processQueue } from './queue';
-import { scheduled } from './scheduled';
+import {
+  CloudflareQueuesClient,
+  D1StateStore,
+  QQReplySender,
+  QQTokenProvider,
+  R2ArchiveStore,
+  RuntimeLoggerAdapter,
+} from '@dicefunc/adapters';
+import {
+  CommandExecutor,
+  type CommandRegistry,
+  DefaultEventHandler,
+  createDefaultCommandRegistry,
+} from '@dicefunc/core';
+import type { Env } from './bindings.js';
+import { createHttpApp } from './http.js';
+import { queue } from './queue.js';
+import { scheduled } from './scheduled.js';
 
-const app = new Hono();
+export interface WorkerDependencies {
+  readonly stateStore: D1StateStore;
+  readonly jobQueue: CloudflareQueuesClient;
+  readonly archiveStore: R2ArchiveStore;
+  readonly logger: RuntimeLoggerAdapter;
+  readonly tokenProvider: QQTokenProvider;
+  readonly replySender: QQReplySender;
+  readonly commandRegistry: CommandRegistry;
+  readonly commandExecutor: CommandExecutor;
+  readonly eventHandler: DefaultEventHandler;
+}
 
-// Health check endpoint
-app.get('/health', (c) => {
-  return c.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+export function createDependencies(env: Env): WorkerDependencies {
+  const stateStore = new D1StateStore(env.DB);
+  const jobQueue = new CloudflareQueuesClient(env.COMMAND_QUEUE, env.ARCHIVE_QUEUE);
+  const archiveStore = new R2ArchiveStore(env.STORY_LOG_BUCKET);
+  const logger = new RuntimeLoggerAdapter({ environment: env.ENVIRONMENT });
+  const tokenProvider = new QQTokenProvider({
+    appId: env.QQ_APP_ID,
+    clientSecret: env.QQ_APP_SECRET,
+    httpClient: globalThis.fetch.bind(globalThis),
+  });
+  const replySender = new QQReplySender({
+    tokenProvider,
+    httpClient: globalThis.fetch.bind(globalThis),
+    logger,
+    environment: env.ENVIRONMENT,
+  });
+  const commandRegistry = createDefaultCommandRegistry();
+  const commandExecutor = new CommandExecutor(commandRegistry);
+  const eventHandler = new DefaultEventHandler(stateStore, commandExecutor);
 
-// QQ Webhook endpoint
-app.post('/webhooks/qq', async (c) => {
-  const rawBody = await c.req.text();
-  const signature = c.req.header('X-Signature-Ed25519');
-  const timestamp = c.req.header('X-Signature-Timestamp');
-  
-  try {
-    const result = await handleWebhook({
-      body: rawBody,
-      signature,
-      timestamp,
-      env: c.env
-    });
-    
-    return c.json(result);
-  } catch (error) {
-    console.error('Webhook handling failed:', error);
-    return c.json({ error: 'Internal server error' }, 500);
-  }
-});
+  return {
+    stateStore,
+    jobQueue,
+    archiveStore,
+    logger,
+    tokenProvider,
+    replySender,
+    commandRegistry,
+    commandExecutor,
+    eventHandler,
+  };
+}
 
 export default {
-  fetch: app.fetch,
-  queue: processQueue,
-  scheduled
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const deps = createDependencies(env);
+    const app = createHttpApp(deps);
+    return app.fetch(request, env, ctx);
+  },
+  queue,
+  scheduled,
 };

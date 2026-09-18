@@ -1,12 +1,15 @@
+import type { QueueMessage } from '@dicefunc/core';
+
 export interface Env {
-  QQ_APP_SECRET: string;
+  ENVIRONMENT: string;
   DB: D1Database;
   CONFIG_KV: KVNamespace;
   STORY_LOG_BUCKET: R2Bucket;
   CONFIG_BUCKET: R2Bucket;
-  COMMAND_QUEUE: Queue<unknown>;
-  ARCHIVE_QUEUE: Queue<unknown>;
+  COMMAND_QUEUE: Queue<QueueMessage>;
+  ARCHIVE_QUEUE: Queue<QueueMessage>;
+  QQ_APP_ID: string;
+  QQ_APP_SECRET: string;
+  QQ_ED25519_PUBLIC_KEY: string;
+  QQ_ED25519_PRIVATE_KEY: string;
 }
-
-// Type definitions for Cloudflare Workers bindings
-export type { D1Database, KVNamespace, R2Bucket, Queue };

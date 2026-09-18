@@ -1,60 +1,96 @@
+export type LogRecordingStatus = 'new' | 'recording' | 'paused' | 'closed';
+
+export type ArchiveStatus =
+  | 'pending'
+  | 'uploading'
+  | 'verified'
+  | 'ready'
+  | 'failed'
+  | 'deleting'
+  | 'deleted';
+
 export interface StoryLog {
   readonly id: string;
   readonly conversationId: string;
   readonly name: string;
-  readonly status: LogStatus;
-  readonly captureMode: CaptureMode;
-  readonly revision: number;
+  readonly status: LogRecordingStatus;
+  readonly archiveStatus: ArchiveStatus;
+  readonly captureMode: 'all' | 'at_only';
+  readonly version: number;
+  readonly cursor: number;
   readonly createdAt: Date;
   readonly updatedAt: Date;
-  readonly closedAt?: Date;
-  readonly cursor?: number;
 }
 
-export type LogStatus = 'new' | 'recording' | 'paused' | 'closed' | 'archived';
-export type CaptureMode = 'all' | 'at_only';
-
-export interface StoryLogItem {
+export function createStoryLog(input: {
   readonly id: string;
-  readonly logId: string;
-  readonly sequenceNumber: number;
-  readonly direction: 'inbound' | 'outbound';
-  readonly sourceId: string;
-  readonly text: string;
-  readonly deliveryStatus: DeliveryStatus;
-  readonly chunkId?: string;
+  readonly conversationId: string;
+  readonly name: string;
+  readonly captureMode?: 'all' | 'at_only' | undefined;
   readonly createdAt: Date;
-}
-
-export type DeliveryStatus = 'pending' | 'sent' | 'failed' | 'unknown';
-
-export interface ArchiveChunk {
-  readonly logId: string;
-  readonly firstSequence: number;
-  readonly lastSequence: number;
-  readonly objectKey: string;
-  readonly sha256: string;
-  readonly byteCount: number;
-  readonly verifiedAt?: Date;
-}
-
-export function createStoryLog(
-  conversationId: string,
-  name: string,
-  captureMode: CaptureMode = 'all'
-): StoryLog {
+}): StoryLog {
   return {
-    id: generateLogId(),
-    conversationId,
-    name,
+    id: input.id,
+    conversationId: input.conversationId,
+    name: input.name,
     status: 'new',
-    captureMode,
-    revision: 1,
-    createdAt: new Date(),
-    updatedAt: new Date()
+    archiveStatus: 'pending',
+    captureMode: input.captureMode ?? 'all',
+    version: 1,
+    cursor: 0,
+    createdAt: input.createdAt,
+    updatedAt: input.createdAt,
   };
 }
 
-function generateLogId(): string {
-  return `log_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+export function updateLogStatus(log: StoryLog, status: LogRecordingStatus, now: Date): StoryLog {
+  return {
+    id: log.id,
+    conversationId: log.conversationId,
+    name: log.name,
+    status,
+    archiveStatus: log.archiveStatus,
+    captureMode: log.captureMode,
+    version: log.version + 1,
+    cursor: log.cursor,
+    createdAt: log.createdAt,
+    updatedAt: now,
+  };
+}
+
+export function updateArchiveStatus(
+  log: StoryLog,
+  archiveStatus: ArchiveStatus,
+  now: Date,
+): StoryLog {
+  return {
+    id: log.id,
+    conversationId: log.conversationId,
+    name: log.name,
+    status: log.status,
+    archiveStatus,
+    captureMode: log.captureMode,
+    version: log.version + 1,
+    cursor: log.cursor,
+    createdAt: log.createdAt,
+    updatedAt: now,
+  };
+}
+
+export function advanceLogCursor(log: StoryLog, itemCount: number, now: Date): StoryLog {
+  if (log.status !== 'recording') {
+    throw new Error(`Cannot append to story log when status is ${log.status}`);
+  }
+  return {
+    id: log.id,
+    conversationId: log.conversationId,
+    name: log.name,
+    status: log.status,
+    archiveStatus: log.archiveStatus,
+    captureMode: log.captureMode,
+    version: log.version + 1,
+    cursor: log.cursor + itemCount,
+    createdAt: log.createdAt,
+    updatedAt: now,
+  };
 }

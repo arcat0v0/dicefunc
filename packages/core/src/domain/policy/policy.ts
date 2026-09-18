@@ -1,62 +1,50 @@
+export type PolicyScope = 'bot' | 'group' | 'user';
+
 export interface PolicyEntry {
   readonly id: string;
   readonly scope: PolicyScope;
-  readonly principalId?: string;
-  readonly groupIds?: string[];
-  readonly action: 'deny' | 'trust';
-  readonly reason?: string;
-  readonly version: number;
-}
-
-export type PolicyScope = 'bot' | 'group' | 'user';
-
-export interface RateBucket {
-  readonly key: string;
-  readonly windowMs: number;
-  readonly maxRequests: number;
-  readonly lastReset: Date;
-  readonly requestCount: number;
+  readonly principalId?: string | undefined;
+  readonly groupIds?: readonly string[] | undefined;
+  readonly effect: 'deny' | 'trust';
+  readonly reason?: string | undefined;
   readonly version: number;
 }
 
 export function createPolicyEntry(
-  scope: PolicyScope,
-  action: 'deny' | 'trust',
-  principalId?: string,
-  groupIds?: string[],
-  reason?: string
+  id: string,
+  input: {
+    readonly scope: PolicyScope;
+    readonly effect: 'deny' | 'trust';
+    readonly principalId?: string | undefined;
+    readonly groupIds?: readonly string[] | undefined;
+    readonly reason?: string | undefined;
+    readonly version?: number | undefined;
+  },
 ): PolicyEntry {
-  return {
-    id: `policy_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-    scope,
-    principalId,
-    groupIds,
-    action,
-    reason,
-    version: 1
+  const entry: {
+    id: string;
+    scope: PolicyScope;
+    effect: 'deny' | 'trust';
+    version: number;
+    principalId?: string | undefined;
+    groupIds?: readonly string[] | undefined;
+    reason?: string | undefined;
+  } = {
+    id,
+    scope: input.scope,
+    effect: input.effect,
+    version: input.version ?? 1,
   };
-}
 
-export function checkRateLimit(
-  bucket: RateBucket,
-  now: Date = new Date()
-): { allowed: boolean; remaining: number } {
-  const timeSinceLastReset = now.getTime() - bucket.lastReset.getTime();
-  
-  if (timeSinceLastReset >= bucket.windowMs) {
-    return {
-      allowed: true,
-      remaining: bucket.maxRequests - 1
-    };
+  if (input.principalId !== undefined) {
+    entry.principalId = input.principalId;
   }
-  
-  const remaining = bucket.maxRequests - bucket.requestCount;
-  return {
-    allowed: bucket.requestCount < bucket.maxRequests,
-    remaining
-  };
-}
+  if (input.groupIds !== undefined) {
+    entry.groupIds = input.groupIds;
+  }
+  if (input.reason !== undefined) {
+    entry.reason = input.reason;
+  }
 
-export function recordRequest(bucket: RateBucket): void {
-  bucket.requestCount++;
+  return entry;
 }

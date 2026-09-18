@@ -1,118 +1,162 @@
-import { DiceExpression, KeepDropType, RandomSource, rollDice, applyKeepDrop } from './expression';
+import type { KeepDropType } from './expression.js';
+
+export class ExpressionBudgetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ExpressionBudgetError';
+  }
+}
 
 export interface ParsedDiceExpression {
   readonly type: 'dice';
   readonly faces: number;
   readonly count: number;
-  readonly keepDrop?: KeepDropType;
-  readonly keepCount?: number;
-  readonly reason?: string;
+  readonly keepDrop?: KeepDropType | undefined;
+  readonly keepCount?: number | undefined;
+  readonly modifier?: number | undefined;
+  readonly repeat: number;
+  readonly reason?: string | undefined;
 }
 
 export interface ParseResult {
   readonly success: boolean;
-  readonly expression?: ParsedDiceExpression;
-  readonly error?: string;
+  readonly expression?: ParsedDiceExpression | undefined;
+  readonly error?: string | undefined;
+}
+
+const DICE_REGEX =
+  /^(\d+)?d(\d+)?(?:(kh|kl|dh|dl)(\d+))?(?:\s*([+-])\s*(\d+))?(?:\s*(?:x|\*)\s*(\d+))?(?:\s+(.+))?$/i;
+
+export function parseDiceExpression(expression: string, defaultSides = 100): ParseResult {
+  const byteLength = new TextEncoder().encode(expression).length;
+  if (byteLength > 2048) {
+    throw new ExpressionBudgetError('Expression input exceeds 2KiB limit');
+  }
+
+  const trimmed = expression.trim();
+  if (!trimmed) {
+    return {
+      success: false,
+      error: 'Empty dice expression',
+    };
+  }
+
+  const match = trimmed.match(DICE_REGEX);
+  if (!match) {
+    return {
+      success: false,
+      error: `Invalid dice expression: ${expression}`,
+    };
+  }
+
+  const countStr = match[1];
+  const facesStr = match[2];
+  const keepDropOp = match[3];
+  const keepCountStr = match[4];
+  const sign = match[5];
+  const modValueStr = match[6];
+  const repeatStr = match[7];
+  const reasonRaw = match[8];
+
+  const count = countStr !== undefined ? Number.parseInt(countStr, 10) : 1;
+  const faces = facesStr !== undefined ? Number.parseInt(facesStr, 10) : defaultSides;
+  const repeat = repeatStr !== undefined ? Number.parseInt(repeatStr, 10) : 1;
+
+  if (Number.isNaN(count) || count <= 0) {
+    return {
+      success: false,
+      error: `Invalid count: ${countStr ?? ''}`,
+    };
+  }
+
+  if (Number.isNaN(faces) || faces <= 0) {
+    return {
+      success: false,
+      error: `Invalid faces: ${facesStr ?? ''}`,
+    };
+  }
+
+  if (Number.isNaN(repeat) || repeat <= 0) {
+    return {
+      success: false,
+      error: `Invalid repeat count: ${repeatStr ?? ''}`,
+    };
+  }
+
+  if (count > 100) {
+    throw new ExpressionBudgetError(`Dice count ${count} exceeds maximum of 100`);
+  }
+
+  if (repeat > 10) {
+    throw new ExpressionBudgetError(`Repeat count ${repeat} exceeds maximum of 10`);
+  }
+
+  const totalDice = count * repeat;
+  if (totalDice > 1000) {
+    throw new ExpressionBudgetError(`Total dice ${totalDice} exceeds maximum of 1000 per command`);
+  }
+
+  let keepDrop: KeepDropType | undefined;
+  let keepCount: number | undefined;
+
+  if (keepDropOp) {
+    keepDrop = keepDropOp.toLowerCase() as KeepDropType;
+    if (keepCountStr !== undefined) {
+      keepCount = Number.parseInt(keepCountStr, 10);
+      if (Number.isNaN(keepCount) || keepCount <= 0) {
+        return {
+          success: false,
+          error: `Invalid keep/drop count: ${keepCountStr}`,
+        };
+      }
+    } else {
+      keepCount = 1;
+    }
+  }
+
+  let modifier: number | undefined;
+  if (sign && modValueStr !== undefined) {
+    const val = Number.parseInt(modValueStr, 10);
+    if (Number.isNaN(val)) {
+      return {
+        success: false,
+        error: `Invalid modifier: ${modValueStr}`,
+      };
+    }
+    modifier = sign === '-' ? -val : val;
+  }
+
+  const reason = reasonRaw?.trim() ? reasonRaw.trim() : undefined;
+
+  const parsed: {
+    type: 'dice';
+    faces: number;
+    count: number;
+    repeat: number;
+    keepDrop?: KeepDropType | undefined;
+    keepCount?: number | undefined;
+    modifier?: number | undefined;
+    reason?: string | undefined;
+  } = {
+    type: 'dice',
+    faces,
+    count,
+    repeat,
+  };
+
+  if (keepDrop !== undefined) parsed.keepDrop = keepDrop;
+  if (keepCount !== undefined) parsed.keepCount = keepCount;
+  if (modifier !== undefined) parsed.modifier = modifier;
+  if (reason !== undefined) parsed.reason = reason;
+
+  return {
+    success: true,
+    expression: parsed,
+  };
 }
 
 export class DiceParser {
-  private static readonly MAX_FACES = 100000;
-  private static readonly MAX_COUNT = 1000;
-  
-  parse(expression: string): ParseResult {
-    const trimmed = expression.trim();
-    
-    // Match pattern: N d M [kl/kh/dl/dh N] [reason]
-    const match = trimmed.match(/^(?:(\d+)\s*d\s*(\d+))(\s+(kl|kh|dl|dh)\s*(\d+))?(\s+.+)?$/i);
-    
-    if (!match) {
-      return {
-        success: false,
-        error: `Invalid dice expression: ${expression}`
-      };
-    }
-    
-    const countStr = match[1];
-    const facesStr = match[2];
-    const keepDropOp = match[4];
-    const keepCountStr = match[5];
-    const reason = match[6]?.trim().replace(/^[\s-]+/, '') || undefined;
-    
-    const count = parseInt(countStr, 10);
-    const faces = parseInt(facesStr, 10);
-    const keepCount = keepCountStr ? parseInt(keepCountStr, 10) : undefined;
-    
-    // Validate
-    if (isNaN(count) || count <= 0) {
-      return {
-        success: false,
-        error: `Invalid count: ${countStr}`
-      };
-    }
-    
-    if (isNaN(faces) || faces <= 0) {
-      return {
-        success: false,
-        error: `Invalid faces: ${facesStr}`
-      };
-    }
-    
-    if (count > DiceParser.MAX_COUNT) {
-      return {
-        success: false,
-        error: `Count exceeds maximum: ${DiceParser.MAX_COUNT}`
-      };
-    }
-    
-    if (faces > DiceParser.MAX_FACES) {
-      return {
-        success: false,
-        error: `Faces exceeds maximum: ${DiceParser.MAX_FACES}`
-      };
-    }
-    
-    // Normalize keep drop operation
-    let keepDrop: KeepDropType | undefined;
-    let normalizedKeepCount: number | undefined;
-    
-    if (keepDropOp) {
-      keepDrop = keepDropOp.toLowerCase() as KeepDropType;
-      normalizedKeepCount = keepCount || Math.ceil(count / 2);
-      
-      if (normalizedKeepCount > count) {
-        normalizedKeepCount = count;
-      }
-    }
-    
-    return {
-      success: true,
-      expression: {
-        type: 'dice',
-        faces,
-        count,
-        keepDrop,
-        keepCount: normalizedKeepCount,
-        reason
-      }
-    };
+  parse(expression: string, defaultSides = 100): ParseResult {
+    return parseDiceExpression(expression, defaultSides);
   }
-  
-  evaluate(parsed: ParsedDiceExpression, randomSource: RandomSource): number[] {
-    const rolls = rollDice(parsed.faces, parsed.count, randomSource);
-    
-    if (parsed.keepDrop && parsed.keepCount) {
-      return applyKeepDrop(rolls, parsed.keepDrop, parsed.keepCount);
-    }
-    
-    return rolls;
-  }
-}
-
-export function simpleRoll(
-  faces: number,
-  count: number,
-  randomSource: RandomSource
-): number {
-  const rolls = rollDice(faces, count, randomSource);
-  return rolls.reduce((sum, n) => sum + n, 0);
 }

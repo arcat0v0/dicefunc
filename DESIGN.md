@@ -753,94 +753,72 @@ execution:
 
 ## 15. 当前交付状态与剩余决定
 
-**已完成 (Commit 54c5f0f, 2026-09-18)**:
+**已完成交付能力**:
 
-### P0-P2 基础架构搭建完成 ✅
+### 基础工程与真实能力清单 ✅
 
-#### 项目结构
-- [x] Monorepo 结构 (pnpm workspace)
-- [x] TypeScript 7 + Biome + Wrangler 工具链配置
-- [x] apps/worker、apps/cli、packages/core/config/adapters目录
+#### 工程门槛与规范
+- [x] Monorepo 架构（pnpm workspace，apps/worker、apps/cli、packages/core、packages/config、packages/adapters）
+- [x] TypeScript 7 严格模式类型系统与全量编译（`tsc -b`）
+- [x] Biome 静态语法与代码规范校验
+- [x] 基于 `@cloudflare/vitest-pool-workers` 的真实 workerd 虚拟环境集成测试与 Vitest 运行时测试套件
+- [x] 一键工程门槛检查入口 `pnpm check`（tsc + biome + config check）
 
 #### 核心领域模型
-- [x] `ConversationSession` - 会话管理（规则集、面数、开关）
-- [x] `CharacterSheet` - 角色卡系统（属性、快照）
-- [x] `performCocCheck` - COC7 检定逻辑框架
-- [x] `rollDice`/`applyKeepDrop` - 掷骰引擎（kl/kh/dl/dh）
-- [x] `DeckSession`/`drawFromDeck` - 牌堆系统（无放回）
-- [x] `StoryLog`/`ArchiveChunk` - 跑团日志分片归档
-- [x] `PolicyEntry`/`RateBucket` - 权限与限流
+- [x] 掷骰引擎：表达式解析计算、WebCrypto 随机源与 `kl`/`kh`/`dl`/`dh`（keep/drop）纯逻辑
+- [x] 抽牌模型：`DeckSession`/`drawFromDeck` 无放回随机抽牌
+- [x] COC7 检定：`performCocCheck` 规则判定（常规/困难/极难/大成功/大失败/失败）
+- [x] 状态机：会话（`ConversationSession`）、角色卡（`CharacterSheet`）、策略限流（`PolicyEntry`/`RateBucket`）与日志状态机（`StoryLog`/`ArchiveChunk`）
 
-#### Ports 接口层
-- [x] `StateStore` - D1 状态存储（claim/load/commit）
-- [x] `ReplySender` - QQ 回复发送
-- [x] `ArchiveStore` - R2 归档读写
-- [x] `RandomSource` - WebCrypto 随机源
-- [x] `JobQueue` - Queues 任务队列
-- [x] `RuntimeLogger` - 结构化日志（含脱敏）
+#### 命令行工具 (CLI)
+- [x] `config check`: 递归检查 YAML 结构语法、拒绝重复键并校验顶层 `schemaVersion`
+- [x] `config build`: 编译全量或单文件配置为 JSON 并输出 SHA-256 完整性摘要
+- [x] `config explain`: 依据 内置默认值 → 全局 `bot.yaml` → 群配置文件 三层优先级解析生效设置
+- [x] `reply preview`: 读取风格 YAML 回复模板，渲染全量候选项 variants
+- [x] `simulate`: 本地环境真实模拟掷骰求值与参数解析
 
-#### 应用服务
-- [x] `CommandExecutor` - 命令执行器
-- [x] `DefaultEventHandler` - QQ 事件处理
-- [x] `CommandRegistry` - 命令注册表（r/help/set）
+#### QQ Webhook 适配器
+- [x] 严格 Fail-Closed Ed25519 签名验证（验签先于 JSON 解析，凭据缺失或签名无效直接 401）
+- [x] 平台回调验证：`op: 13` 回调挑战应答（Ed25519 私钥签名 `plain_token`）
+- [x] 消息场景映射：群聊 @ 消息（`GROUP_AT_MESSAGE_CREATE`）、C2C 私聊（`C2C_MESSAGE_CREATE`）、频道私信（`DIRECT_MESSAGE_CREATE`）
+- [x] 原子持久化：`inbox` 去重流水与 `job` 调度任务在 `StateStore` 中原子提交
+- [x] 队列极简化：`COMMAND_QUEUE` 仅传递 `{ jobId, botId }` 最小调度载荷
 
-#### Cloudflare Workers 适配器
-- [x] `D1StateStore` - D1 状态存储实现
-- [x] `QQWebhookHandler` - QQ webhook 验签与事件解析
-- [x] `QQReplySender` - QQ 消息发送
-- [x] `R2ArchiveStore` - R2 归档上传下载
-- [x] `CloudflareQueuesClient` - Queues 客户端
+#### D1 状态存储 (StateStore)
+- [x] 基于 Cloudflare D1 驱动
+- [x] `commit_guards` 表使用 `CHECK (actual_version = expected_version)` 约束守卫整批 SQL 事务回滚
+- [x] 基于 `fencingToken` 的任务租约控制，支持异常重试、超时补投与死信清理
 
-#### CLI 工具
-- [x] `config check/build/explain` - 配置管理
-- [x] `reply preview` - 模板预览
-- [x] `simulate` - 命令模拟
+#### R2 归档存储 (ArchiveStore)
+- [x] `R2ArchiveStore` 分片与归档文件 put/read 校验（包含 SHA-256 摘要与大小校验）
+- [x] `GET /archives/:id` 路由实现下载鉴权（Bearer token 哈希比对、期限与撤销状态校验）、审计写入与安全响应头控制
 
-#### 配置文件
-- [x] bot.yaml, access.yaml, storage.yaml, logging.yaml, limits.yaml
-- [x] rules/coc7.yaml, dnd5e.yaml
-- [x] flavors/classic/gothic + 回复模板
+#### 运行时结构化日志 (RuntimeLogger)
+- [x] 字段白名单过滤机制，屏蔽密钥、token、用户正文等敏感信息
+- [x] 单条日志序列化后严格限制在 8 KiB 内截断并标记
 
-#### 数据库迁移
-- [x] 001_initial_schema.sql - 19 张完整表（conversations, principals, character_sheets, received_events, command_results, outgoing_messages, story_logs, story_log_items, log_archives, jobs, config_releases 等）
+#### 数据库架构
+- [x] `migrations/001_initial_schema.sql` 提供 21 张完整表，包含 `commit_guards` 强约束守卫与复合唯一约束
 
-#### 测试框架
-- [x] 运行时测试：random-source, dice, deck
-- [x] 集成测试模板：state-store
-- [x] Vitest 配置
+---
 
-#### 文档
-- [x] README.md - 项目说明
-- [x] docs/configuration.md - 配置指南
-- [x] docs/logging-and-retention.md - 日志策略
-- [x] docs/testing.md - 测试说明
+### 待完成事项清单
 
-#### 待完成事项
+**P1 消息与诊断（剩余）**:
+- [ ] 云端实测（真实 Cloudflare 多区域环境下的冷启动与排队延迟）
+- [ ] QQ 开放平台真实网关全链路联调与公网环境验证
+- [ ] C2C 端到端实测验证与异常分支处理
 
-**P1 消息与诊断** (进行中):
-- [ ] QQ 签名验证实现（Ed25519 + Web Crypto）
-- [ ] D1 StateStore 真实 batch 事务与守卫约束
-- [ ] Queue 消费者完整命令执行流程
-- [ ] RuntimeLogger 实际集成与生产验证
-
-**P2 掷骰与风格**:
-- [ ] 表达式解析器完善（ lexer + Pratt parser）
-- [ ] 模板渲染引擎实现
-- [ ] CLI 模拟器增强
+**P2 掷骰与风格（剩余）**:
+- [ ] 模板渲染引擎接入 Worker 消息发送管线（当前 Worker 返回纯文本回复）
+- [ ] 完善表达式解析器（lexer + Pratt parser，处理更复杂复合算子）
 
 **P3-P8**: 按顺序逐步实现
-- P3: 持久角色卡系统（st/pc/set/bot 命令）
+- P3: 持久角色卡系统（st/pc/set/bot 命令完备化）
 - P4: COC7 完整规则（SC/EN/COC/TI/LI）
 - P5: DND5e 完整规则（HP/法术位/死亡豁免）
-- P6: 牌堆与自定义回复
-- P7: 受保护跑团日志（R2 分片/导出/下载授权）
-- P8: 兼容性验收与云端验证
-
-**下一步行动**:
-1. 安装依赖：`pnpm install`
-2. 创建 Cloudflare 资源：D1/KV/R2/Queues
-3. 配置环境变量：QQ_APP_SECRET
-4. 本地测试：`wrangler dev` + `pnpm test:runtime`
-5. 实现 D1 batch 事务守卫约束（P1 关键部分）
+- P6: 牌堆与自定义回复接入聊天命令管线，配置包云端版本化发布（KV/R2 versioned）
+- P7: 受保护跑团日志交互命令（.log new/on/off/end/export）与 ARCHIVE_QUEUE 持续分片归档
+- P8: 兼容性验收与云端生产验证
 
 原 Go 实现只用于兼容参考。移植代码保留许可文本，素材逐项记录来源。ESA、其他运行平台、完整 dicescript、不可信插件沙箱、运维系统和跨云灾备继续暂缓。

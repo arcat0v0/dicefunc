@@ -9,11 +9,13 @@
     "build": "tsc"
   },
   "dependencies": {
+    "@dicefunc/adapters": "workspace:*",
+    "@dicefunc/core": "workspace:*",
     "hono": "^4.0.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260918.0",
+    "@cloudflare/workers-types": "^5.20260918.1",
     "typescript": "^7.0.0",
-    "wrangler": "^3.0.0"
+    "wrangler": "^4.0.0"
   }
 }

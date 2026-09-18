@@ -13,7 +13,7 @@ templates:
           在绝望中，{{actor.name}}找到了希望。
           {{skill.name}}大成功：{{roll.total}} / {{target.value}}
   
-  coc.check.failure:
+  coc.check.failed:
     variants:
       - id: whisper
         weight: 3

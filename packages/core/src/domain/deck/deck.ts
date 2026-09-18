@@ -1,74 +1,111 @@
-export interface Deck {
-  readonly id: string;
-  readonly name: string;
-  readonly cards: Card[];
-  readonly version: number;
-}
+import type { RandomSource } from '../../ports/random-source.js';
 
 export interface Card {
   readonly id: string;
   readonly text: string;
   readonly weight: number;
-  readonly nestedDecks?: NestedDeck[];
 }
 
-export interface NestedDeck {
-  readonly deckId: string;
-  readonly weight: number;
+export interface Deck {
+  readonly id: string;
+  readonly name: string;
+  readonly cards: readonly Card[];
+  readonly version: number;
 }
 
 export interface DeckSession {
+  readonly sessionId: string;
   readonly deckId: string;
-  readonly remainingCards: Card[];
+  readonly remaining: readonly Card[];
   readonly drawnCount: number;
   readonly version: number;
 }
 
-export interface DrawResult {
-  readonly card: Card;
-  readonly remainingCount: number;
-  readonly isLastCard: boolean;
-}
-
-export function createDeck(deckData: Omit<Deck, 'version'>): Deck {
-  return {
-    ...deckData,
-    version: 1
-  };
-}
-
-export function createDeckSession(deckId: string): DeckSession {
-  return {
-    deckId,
-    remainingCards: [],
-    drawnCount: 0,
-    version: 1
-  };
-}
-
-export function drawFromDeck(
-  session: DeckSession,
-  randomSource: RandomSource
-): DrawResult | null {
-  if (session.remainingCards.length === 0) {
-    return null;
+export function createDeck(input: {
+  readonly id: string;
+  readonly name: string;
+  readonly cards: readonly Card[];
+}): Deck {
+  if (input.cards.length === 0) {
+    throw new Error('Deck must not be empty');
   }
-  
-  const totalWeight = session.remainingCards.reduce((sum, card) => sum + card.weight, 0);
-  let random = randomSource.integer(1, totalWeight);
-  let cumulative = 0;
-  
-  for (const card of session.remainingCards) {
-    cumulative += card.weight;
-    if (random <= cumulative) {
-      const newRemaining = session.remainingCards.filter(c => c.id !== card.id);
-      return {
-        card,
-        remainingCount: newRemaining.length,
-        isLastCard: newRemaining.length === 0
-      };
+  for (const card of input.cards) {
+    if (!Number.isInteger(card.weight) || card.weight <= 0) {
+      throw new Error(`Invalid card weight: ${card.weight}`);
     }
   }
-  
-  return null;
+  return {
+    id: input.id,
+    name: input.name,
+    cards: Object.freeze([...input.cards]),
+    version: 1,
+  };
+}
+
+export function createDeckSession(sessionId: string, deck: Deck): DeckSession {
+  return {
+    sessionId,
+    deckId: deck.id,
+    remaining: Object.freeze([...deck.cards]),
+    drawnCount: 0,
+    version: 1,
+  };
+}
+
+export async function drawFromDeck(
+  session: DeckSession,
+  count: number,
+  random: RandomSource,
+): Promise<{
+  readonly session: DeckSession;
+  readonly drawn: readonly Card[];
+}> {
+  if (count <= 0) {
+    return {
+      session,
+      drawn: [],
+    };
+  }
+  if (session.remaining.length === 0) {
+    throw new Error('Deck is exhausted');
+  }
+
+  const currentRemaining = [...session.remaining];
+  const drawn: Card[] = [];
+  const drawLimit = Math.min(count, currentRemaining.length);
+
+  for (let i = 0; i < drawLimit; i++) {
+    const totalWeight = currentRemaining.reduce((sum, c) => sum + c.weight, 0);
+    const target = await random.integer(1, totalWeight);
+    let cumulative = 0;
+    let chosenIndex = -1;
+
+    for (const [j, card] of currentRemaining.entries()) {
+      cumulative += card.weight;
+      if (target <= cumulative) {
+        chosenIndex = j;
+        break;
+      }
+    }
+
+    if (chosenIndex >= 0) {
+      const [card] = currentRemaining.splice(chosenIndex, 1);
+      if (card) {
+        drawn.push(card);
+      }
+    }
+  }
+
+  const newSession: DeckSession = {
+    sessionId: session.sessionId,
+    deckId: session.deckId,
+    remaining: Object.freeze(currentRemaining),
+    drawnCount: session.drawnCount + drawn.length,
+    version: session.version + 1,
+  };
+
+  return {
+    session: newSession,
+    drawn: Object.freeze(drawn),
+  };
 }

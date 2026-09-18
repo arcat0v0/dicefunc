@@ -1,74 +1,65 @@
-export interface DiceExpression {
-  readonly type: 'expression';
-  readonly value: string;
-  readonly keepDrop?: KeepDropType;
-  readonly keepCount?: number;
-  readonly reason?: string;
-}
+import type { RandomSource } from '../../ports/random-source.js';
 
 export type KeepDropType = 'kl' | 'kh' | 'dl' | 'dh';
 
 export interface DiceRollResult {
   readonly expression: string;
-  readonly diceFaces: number[];
+  readonly faces: number;
+  readonly count: number;
+  readonly rolls: readonly number[];
+  readonly keptRolls: readonly number[];
   readonly total: number;
-  readonly individualRolls: number[];
-  readonly reason?: string;
+  readonly reason?: string | undefined;
+  readonly keepDrop?: KeepDropType | undefined;
+  readonly keepCount?: number | undefined;
+  readonly modifier?: number | undefined;
 }
 
-export interface DiceEvaluator {
-  evaluate(expression: string, randomSource: RandomSource): DiceRollResult;
-}
-
-export interface RandomSource {
-  integer(minInclusive: number, maxInclusive: number): number;
-}
-
-export function createWebCryptoRandomSource(): RandomSource {
-  return {
-    integer(minInclusive: number, maxInclusive: number): number {
-      const range = maxInclusive - minInclusive + 1;
-      const maxRange = Math.floor(0xffffffff / range) * range;
-      
-      let result: number;
-      do {
-        const bytes = new Uint32Array(1);
-        crypto.getRandomValues(bytes);
-        result = bytes[0];
-      } while (result >= maxRange);
-      
-      return minInclusive + (result % range);
-    }
-  };
-}
-
-export function rollDice(
-  faces: number,
+export async function rollDice(
+  sides: number,
   count: number,
-  randomSource: RandomSource
-): number[] {
+  random: RandomSource,
+): Promise<number[]> {
+  if (sides <= 0 || count <= 0) {
+    return [];
+  }
   const rolls: number[] = [];
   for (let i = 0; i < count; i++) {
-    rolls.push(randomSource.integer(1, faces));
+    rolls.push(await random.integer(1, sides));
   }
-  return rolls.sort((a, b) => a - b);
+  return rolls;
 }
 
 export function applyKeepDrop(
-  rolls: number[],
+  rolls: readonly number[],
   keepDropType: KeepDropType,
-  count: number
+  count: number,
 ): number[] {
+  if (count <= 0) {
+    if (keepDropType === 'kl' || keepDropType === 'kh') {
+      return [];
+    }
+    return [...rolls];
+  }
+
+  const sorted = [...rolls].sort((a, b) => a - b);
+  const total = sorted.length;
+
+  if (count >= total) {
+    if (keepDropType === 'kl' || keepDropType === 'kh') {
+      return sorted;
+    }
+    return [];
+  }
+
   switch (keepDropType) {
     case 'kl':
-      return rolls.slice(0, count);
+      return sorted.slice(0, count);
     case 'kh':
-      return rolls.slice(-count);
+      return sorted.slice(total - count);
     case 'dl':
-      return rolls.slice(-count);
+      return sorted.slice(count);
     case 'dh':
-      return rolls.slice(0, count);
-    default:
-      return rolls;
+      return sorted.slice(0, total - count);
   }
 }

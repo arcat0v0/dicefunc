@@ -1,109 +1,62 @@
-import { RuntimeLogger, LogEvent, LogLevel, DEFAULT_LOGGER_CONFIG } from '../../core/src/ports/runtime-logger';
+import type { LogEvent, RuntimeLogger } from '@dicefunc/core';
+import { serializeLogEntry } from '@dicefunc/core';
 
-export class CloudflareRuntimeLogger implements RuntimeLogger {
-  private config: typeof DEFAULT_LOGGER_CONFIG;
-  
-  constructor(config?: typeof DEFAULT_LOGGER_CONFIG) {
-    this.config = config || { ...DEFAULT_LOGGER_CONFIG };
+export class RuntimeLoggerAdapter implements RuntimeLogger {
+  private readonly boundFields: Partial<LogEvent>;
+
+  constructor(boundFields: Partial<LogEvent> = {}) {
+    this.boundFields = boundFields;
   }
 
-  debug(event: LogEvent): void {
-    if (!this.config.allowProductionDebug) return;
-    this.log('debug', event);
-  }
+  log(entry: LogEvent): boolean {
+    const mergedMetadata =
+      this.boundFields.metadata !== undefined || entry.metadata !== undefined
+        ? { ...(this.boundFields.metadata ?? {}), ...(entry.metadata ?? {}) }
+        : undefined;
 
-  info(event: LogEvent): void {
-    this.log('info', event);
-  }
+    const merged: LogEvent = {
+      ...this.boundFields,
+      ...entry,
+      ...(mergedMetadata !== undefined ? { metadata: mergedMetadata } : {}),
+    };
 
-  warn(event: LogEvent): void {
-    this.log('warn', event);
-  }
-
-  error(event: LogEvent): void {
-    this.log('error', event);
-  }
-
-  updateConfig(newConfig: typeof DEFAULT_LOGGER_CONFIG): void {
-    this.config = { ...newConfig };
-  }
-
-  private log(level: LogLevel, event: LogEvent): void {
-    const sanitized = this.sanitizeEvent(event);
-    const entryString = JSON.stringify(sanitized);
-    
-    // Truncate if too long
-    if (entryString.length > 8192) {
-      sanitized.metadata = sanitized.metadata || {};
-      sanitized.metadata.truncated = true;
+    if (merged.level === 'debug' && merged.environment === 'production') {
+      return false;
     }
-    
-    console[this.logLevelToConsoleMethod(level)](JSON.stringify(sanitized));
-  }
 
-  private sanitizeEvent(event: LogEvent): LogEvent {
-    const sanitized = { ...event };
-    
-    if (sanitized.metadata) {
-      sanitized.metadata = this.redactSensitiveData(sanitized.metadata);
+    const serialized = serializeLogEntry(merged, 8192);
+    if (serialized === null) {
+      return false;
     }
-    
-    return sanitized;
-  }
 
-  private redactSensitiveData(data: Record<string, unknown>): Record<string, unknown> {
-    const sensitiveKeys = ['secret', 'token', 'password', 'key', 'auth', 'credential'];
-    const result: Record<string, unknown> = {};
-    
-    for (const [key, value] of Object.entries(data)) {
-      const lowerKey = key.toLowerCase();
-      
-      if (sensitiveKeys.some(sk => lowerKey.includes(sk))) {
-        result[key] = '[REDACTED]';
-      } else if (typeof value === 'string') {
-        result[key] = this.redactString(value);
-      } else if (typeof value === 'object' && value !== null) {
-        result[key] = this.redactSensitiveData(value as Record<string, unknown>);
-      } else {
-        result[key] = value;
-      }
-    }
-    
-    return result;
-  }
-
-  private redactString(str: string): string {
-    const patterns = [
-      /Bearer\s+[a-zA-Z0-9_-]+/g,
-      /[a-f0-9]{32,}/g,
-      /\d{10,}/g,
-      /QQ_APP_SECRET.*$/gm
-    ];
-    
-    let result = str;
-    for (const pattern of patterns) {
-      result = result.replace(pattern, '[REDACTED]');
-    }
-    
-    return result;
-  }
-
-  private logLevelToConsoleMethod(level: LogLevel): keyof Console {
-    switch (level) {
+    switch (merged.level) {
       case 'debug':
-        return 'debug';
+        console.debug(serialized);
+        break;
       case 'info':
-        return 'log';
+        console.info(serialized);
+        break;
       case 'warn':
-        return 'warn';
+        console.warn(serialized);
+        break;
       case 'error':
-        return 'error';
+        console.error(serialized);
+        break;
     }
-  }
-}
 
-export function createRuntimeLogger(
-  config?: typeof DEFAULT_LOGGER_CONFIG
-): RuntimeLogger {
-  return new CloudflareRuntimeLogger(config);
+    return true;
+  }
+
+  child(fields: Partial<LogEvent>): RuntimeLogger {
+    const mergedMetadata =
+      this.boundFields.metadata !== undefined || fields.metadata !== undefined
+        ? { ...(this.boundFields.metadata ?? {}), ...(fields.metadata ?? {}) }
+        : undefined;
+
+    return new RuntimeLoggerAdapter({
+      ...this.boundFields,
+      ...fields,
+      ...(mergedMetadata !== undefined ? { metadata: mergedMetadata } : {}),
+    });
+  }
 }

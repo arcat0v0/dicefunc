@@ -1,6 +1,6 @@
 schemaVersion: 1
 templates:
-  dice.roll.success:
+  dice.roll:
     variants:
       - id: standard
         weight: 3
@@ -11,11 +11,3 @@ templates:
         weight: 2
         text: |
           {{actor.name}}：{{total}} ({{expression}})
-  
-  dice.roll.failure:
-    variants:
-      - id: standard
-        weight: 3
-        text: |
-          {{actor.name}}掷骰失败：{{expression}} = {{total}}
-          [{{individualRolls}}]

@@ -6,7 +6,5 @@
     "types": ["@cloudflare/workers-types"]
   },
   "include": ["src/**/*"],
-  "references": [
-    { "path": "../core" }
-  ]
+  "references": [{ "path": "../core" }]
 }

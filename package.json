@@ -4,13 +4,14 @@
   "private": true,
   "packageManager": "pnpm@9.0.0",
   "scripts": {
-    "check": "biome check --write .",
+    "check": "tsc -b && biome check . && pnpm run --filter dice check",
     "test:unit": "vitest run",
-    "test:integration": "vitest run tests/integration/",
+    "test:integration": "vitest run -c tests/integration/vitest.config.ts",
     "test:runtime": "vitest run tests/runtime/",
-    "dev:worker": "wrangler dev",
-    "deploy:worker": "wrangler deploy",
-    "cli": "pnpm run --filter=dice func"
+    "dev:worker": "wrangler dev -c apps/worker/wrangler.jsonc",
+    "deploy:worker": "wrangler deploy -c apps/worker/wrangler.jsonc",
+    "dice": "pnpm run --filter dice cli",
+    "cli": "pnpm run --filter dice cli"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
@@ -18,7 +19,7 @@
     "@types/node": "^22.0.0",
     "typescript": "^7.0.0",
     "vitest": "^2.0.0",
-    "wrangler": "^3.0.0"
+    "wrangler": "^4.0.0"
   },
   "engines": {
     "node": ">=22.0.0"

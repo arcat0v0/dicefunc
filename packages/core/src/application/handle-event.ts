@@ -1,114 +1,192 @@
-import { VerifiedEvent, StateStore, CommandScope } from '../ports/state-store';
-import { CommandExecutor, CommandContext, CommandDecision } from './execute-command';
-import { RandomSource, createWebCryptoRandomSource } from '../ports/random-source';
+import { type Clock, systemClock } from '../ports/clock.js';
+import { createSeededRandomSource } from '../ports/random-source.js';
+import type {
+  CommandCommit,
+  CommandScope,
+  CommitOutcome,
+  InboundLogItem,
+  PreparedReply,
+  StateStore,
+  VerifiedEvent,
+} from '../ports/state-store.js';
+import { type CommandBudget, type CommandContext, CommandExecutor } from './execute-command.js';
 
-export interface EventHandler {
-  handle(event: VerifiedEvent): Promise<EventOutcome>;
-}
-
-export interface EventOutcome {
+export interface EventHandleResult {
   readonly success: boolean;
   readonly eventId: string;
-  readonly executionId?: string;
   readonly messageKey: string;
-  readonly queued: boolean;
-  readonly error?: EventError;
+  readonly executionId?: string | undefined;
+  readonly alreadyProcessed?: boolean | undefined;
+  readonly commitOutcome?: CommitOutcome | undefined;
+  readonly error?:
+    | {
+        readonly code: string;
+        readonly message: string;
+        readonly retryable?: boolean | undefined;
+      }
+    | undefined;
 }
 
-export interface EventError {
-  readonly code: string;
-  readonly message: string;
-  readonly retryable: boolean;
+export interface EventHandler {
+  handle(event: VerifiedEvent): Promise<EventHandleResult>;
 }
 
 export class DefaultEventHandler implements EventHandler {
   private readonly stateStore: StateStore;
   private readonly commandExecutor: CommandExecutor;
-  private readonly randomSource: RandomSource;
-  
+  private readonly clock: Clock;
+  private readonly configDigest: string;
+
   constructor(
     stateStore: StateStore,
     commandExecutor?: CommandExecutor,
-    randomSource?: RandomSource
+    clock?: Clock,
+    configDigest?: string,
   ) {
     this.stateStore = stateStore;
-    this.commandExecutor = commandExecutor || new CommandExecutor();
-    this.randomSource = randomSource || createWebCryptoRandomSource();
+    this.commandExecutor = commandExecutor ?? new CommandExecutor();
+    this.clock = clock ?? systemClock;
+    this.configDigest = configDigest ?? 'v1-default-config';
   }
-  
-  async handle(event: VerifiedEvent): Promise<EventOutcome> {
-    const claim = await this.stateStore.claimEvent(event);
-    
-    if (claim.status !== 'claimed') {
+
+  async handle(event: VerifiedEvent): Promise<EventHandleResult> {
+    const claim = await this.stateStore.claimEvent(event, this.configDigest);
+
+    if (claim.alreadyProcessed) {
       return {
-        success: false,
-        eventId: event.messageId,
+        success: true,
+        eventId: event.eventId,
         messageKey: claim.messageKey,
-        queued: false,
-        error: {
-          code: 'EVENT_ALREADY_PROCESSED',
-          message: 'Event has already been processed',
-          retryable: false
-        }
+        alreadyProcessed: true,
       };
     }
-    
+
+    const scope: CommandScope = {
+      botId: event.botId,
+      scene: event.scene,
+      externalId: event.externalId,
+      principal: event.sender,
+    };
+
+    const deadline = new Date(event.timestamp.getTime() + 300_000);
+    const executionId = `exec_${event.eventId}`;
+
     try {
-      const scope: CommandScope = {
-        botId: event.botId,
-        scene: event.scene,
-        conversationId: `${event.scene}:${event.externalId}`,
-        principalId: event.sender.scopeId
-      };
-      
-      const snapshot = await this.stateStore.loadSnapshot(scope);
-      
-      const context: CommandContext = {
-        snapshot,
-        randomSource: this.randomSource,
-        configVersion: claim.configDigest,
-        budget: {
+      let snapshot = await this.stateStore.loadSnapshot(scope);
+      let random = await createSeededRandomSource(claim.seed, 'command-execution');
+
+      const runExecution = async (
+        currentSnapshot: typeof snapshot,
+        currentRandom: typeof random,
+      ): Promise<CommandCommit> => {
+        const budget: CommandBudget = {
           maxDiceRolls: 1000,
           maxRecursionDepth: 32,
-          maxOutputBytes: 4096
-        }
-      };
-      
-      const decision = await this.commandExecutor.execute(scope, context);
-      
-      if (decision.success && decision.executionId) {
+          maxOutputBytes: 8192,
+          consumed: {
+            diceRolls: 0,
+            recursionDepth: 0,
+            outputBytes: 0,
+          },
+        };
+
+        const context: CommandContext = {
+          snapshot: currentSnapshot,
+          random: currentRandom,
+          clock: this.clock,
+          permissions: currentSnapshot.permissions,
+          budget,
+          configVersion: this.configDigest,
+          botId: event.botId,
+        };
+
+        const decision = await this.commandExecutor.execute(event, context);
+
+        const assembledReplies: PreparedReply[] = decision.replies.map((rep, idx) => ({
+          executionId,
+          part: rep.part > 0 ? rep.part : 1,
+          msgSeq: idx + 1,
+          scene: rep.scene ?? event.scene,
+          targetId: rep.targetId ?? event.externalId,
+          originMessageId: rep.originMessageId ?? event.messageId,
+          templateKey: rep.templateKey,
+          variantId: rep.variantId,
+          text: rep.text,
+          deadline,
+        }));
+
+        const logItems: InboundLogItem[] = [
+          {
+            sourceId: event.sender.externalId,
+            seq: claim.conversationSeq,
+            direction: 'inbound',
+            text: event.text,
+            deliveryStatus: 'sent',
+          },
+          ...decision.logItems,
+        ];
+
+        const transactionId = `txn_${event.eventId}_${this.clock.now().getTime()}`;
+
         return {
-          success: true,
-          eventId: event.messageId,
-          executionId: decision.executionId,
+          transactionId,
+          eventId: event.eventId,
+          executionId,
+          botId: event.botId,
+          conversationId: claim.conversationId,
+          conversationSeq: claim.conversationSeq,
+          lease: null,
+          updates: decision.updates,
+          results: decision.results,
+          replies: assembledReplies,
+          logItems,
+          completeEvent: true,
+        };
+      };
+
+      let commitPlan = await runExecution(snapshot, random);
+      let outcome = await this.stateStore.commit(commitPlan);
+
+      if (!outcome.success && outcome.conflict) {
+        snapshot = await this.stateStore.loadSnapshot(scope);
+        random = await createSeededRandomSource(claim.seed, 'command-execution');
+        commitPlan = await runExecution(snapshot, random);
+        outcome = await this.stateStore.commit(commitPlan);
+      }
+
+      if (!outcome.success) {
+        return {
+          success: false,
+          eventId: event.eventId,
           messageKey: claim.messageKey,
-          queued: true
+          executionId,
+          commitOutcome: outcome,
+          error: {
+            code: 'COMMIT_FAILED',
+            message: 'StateStore commit failed after attempt',
+            retryable: outcome.conflict,
+          },
         };
       }
-      
+
       return {
-        success: false,
-        eventId: event.messageId,
+        success: true,
+        eventId: event.eventId,
         messageKey: claim.messageKey,
-        queued: false,
-        error: decision.errors?.[0] ? {
-          code: decision.errors[0].code,
-          message: decision.errors[0].message,
-          retryable: false
-        } : undefined
+        executionId,
+        commitOutcome: outcome,
       };
-      
-    } catch (error) {
+    } catch (err) {
       return {
         success: false,
-        eventId: event.messageId,
+        eventId: event.eventId,
         messageKey: claim.messageKey,
-        queued: false,
+        executionId,
         error: {
-          code: 'HANDLER_ERROR',
-          message: error instanceof Error ? error.message : 'Unknown error',
-          retryable: true
-        }
+          code: 'EXECUTION_FAILED',
+          message: err instanceof Error ? err.message : 'Unknown error during event handling',
+          retryable: true,
+        },
       };
     }
   }

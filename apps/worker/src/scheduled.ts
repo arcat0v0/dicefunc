@@ -1,40 +1,70 @@
-export async function scheduled(event: ScheduledEvent, env: Env): Promise<void> {
-  const type = event.scheduledTime;
-  
-  try {
-    // Retry failed jobs
-    await retryFailedJobs(env);
-    
-    // Purge old execution data
-    await purgeOldExecutionData(env);
-    
-    // Verify archive lag
-    await verifyArchiveLag(env);
-    
-    console.log('Scheduled task completed successfully');
-  } catch (error) {
-    console.error('Scheduled task failed:', error);
-    throw error;
+import type { ExecutionContext, ScheduledController } from '@cloudflare/workers-types';
+import { buildLogEntry } from '@dicefunc/core';
+import type { Env } from './bindings.js';
+import type { WorkerDependencies } from './index.js';
+import { createDependencies } from './index.js';
+
+export async function scheduled(
+  controller: ScheduledController,
+  env: Env,
+  ctx: ExecutionContext,
+  dependencies?: WorkerDependencies,
+): Promise<void> {
+  const deps = dependencies ?? createDependencies(env);
+
+  const recoverableLimit = 20;
+  const recoverableJobs = await deps.stateStore.listRecoverableJobs(
+    env.QQ_APP_ID,
+    recoverableLimit,
+  );
+
+  for (const job of recoverableJobs) {
+    if (job.type === 'command') {
+      await deps.jobQueue.enqueueCommand({
+        jobId: job.jobId,
+        type: 'command',
+        schemaVersion: 1,
+      });
+    } else if (job.type === 'archive-chunk') {
+      await deps.jobQueue.enqueueArchive({
+        jobId: job.jobId,
+        type: 'archive-chunk',
+        schemaVersion: 1,
+      });
+    }
   }
-}
 
-async function retryFailedJobs(env: Env): Promise<void> {
-  // TODO: Query D1 for jobs that need retry
-  // Update next_attempt_at and requeue if needed
-  console.log('Retrying failed jobs...');
-}
+  deps.logger.log(
+    buildLogEntry({
+      level: 'info',
+      event: 'scheduled.recover_jobs',
+      component: 'scheduled',
+      environment: env.ENVIRONMENT,
+      outcome: 'success',
+      metadata: {
+        recoveredCount: recoverableJobs.length,
+      },
+    }),
+  );
 
-async function purgeOldExecutionData(env: Env): Promise<void> {
-  // TODO: Delete command_results older than retention period
-  // Delete received_events tombstones older than dedupRetentionDays
-  console.log('Purging old execution data...');
-}
+  const purgeResult = await deps.stateStore.purgeExpiredData(env.QQ_APP_ID, {
+    resultDays: 7,
+    dedupDays: 30,
+    auditDays: 90,
+  });
 
-async function verifyArchiveLag(env: Env): Promise<void> {
-  // TODO: Check archive queue lag
-  // Pause logging if lag exceeds threshold
-  console.log('Verifying archive lag...');
+  deps.logger.log(
+    buildLogEntry({
+      level: 'info',
+      event: 'scheduled.purge_expired',
+      component: 'scheduled',
+      environment: env.ENVIRONMENT,
+      outcome: 'success',
+      metadata: {
+        results: purgeResult.results,
+        events: purgeResult.events,
+        audits: purgeResult.audits,
+      },
+    }),
+  );
 }
-
-// Export for testing
-export { retryFailedJobs, purgeOldExecutionData, verifyArchiveLag };

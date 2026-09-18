@@ -13,7 +13,7 @@ templates:
           {{actor.name}}掷出了大成功！
           {{skill.name}}：{{roll.total}} / {{target.value}}
   
-  coc.check.failure:
+  coc.check.failed:
     variants:
       - id: standard
         weight: 3

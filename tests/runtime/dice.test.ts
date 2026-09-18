@@ -1,61 +1,105 @@
-import { describe, it, expect } from 'vitest';
-import { rollDice, applyKeepDrop, createWebCryptoRandomSource } from '../../../packages/core/src/domain/dice/expression';
+import {
+  ExpressionBudgetError,
+  applyKeepDrop,
+  createWebCryptoRandomSource,
+  parseDiceExpression,
+  rollDice,
+} from '@dicefunc/core';
+import { describe, expect, it } from 'vitest';
 
-describe('Dice Rolling', () => {
-  const randomSource = createWebCryptoRandomSource();
-  
-  it('should roll single die', () => {
-    const rolls = rollDice(6, 1, randomSource);
-    expect(rolls).toHaveLength(1);
-    expect(rolls[0]).toBeGreaterThanOrEqual(1);
-    expect(rolls[0]).toBeLessThanOrEqual(6);
+describe('applyKeepDrop', () => {
+  it('drops lowest rolls with dl', () => {
+    const rolls = [4, 1, 6, 2, 5];
+    const kept = applyKeepDrop(rolls, 'dl', 2);
+    expect(kept).toEqual([4, 5, 6]);
   });
-  
-  it('should roll multiple dice', () => {
-    const rolls = rollDice(6, 3, randomSource);
-    expect(rolls).toHaveLength(3);
-    rolls.forEach(r => {
-      expect(r).toBeGreaterThanOrEqual(1);
-      expect(r).toBeLessThanOrEqual(6);
-    });
+
+  it('drops highest rolls with dh', () => {
+    const rolls = [4, 1, 6, 2, 5];
+    const kept = applyKeepDrop(rolls, 'dh', 2);
+    expect(kept).toEqual([1, 2, 4]);
   });
-  
-  it('should sort rolls in ascending order', () => {
-    const rolls = rollDice(6, 5, randomSource);
-    for (let i = 1; i < rolls.length; i++) {
-      expect(rolls[i]).toBeGreaterThanOrEqual(rolls[i - 1]);
-    }
+
+  it('keeps highest rolls with kh', () => {
+    const rolls = [4, 1, 6, 2, 5];
+    const kept = applyKeepDrop(rolls, 'kh', 2);
+    expect(kept).toEqual([5, 6]);
+  });
+
+  it('keeps lowest rolls with kl', () => {
+    const rolls = [4, 1, 6, 2, 5];
+    const kept = applyKeepDrop(rolls, 'kl', 2);
+    expect(kept).toEqual([1, 2]);
+  });
+
+  it('handles boundary counts for keep and drop', () => {
+    const rolls = [1, 2, 3];
+    expect(applyKeepDrop(rolls, 'dl', 0)).toEqual([1, 2, 3]);
+    expect(applyKeepDrop(rolls, 'dh', 0)).toEqual([1, 2, 3]);
+    expect(applyKeepDrop(rolls, 'kl', 0)).toEqual([]);
+    expect(applyKeepDrop(rolls, 'kh', 0)).toEqual([]);
+
+    expect(applyKeepDrop(rolls, 'dl', 3)).toEqual([]);
+    expect(applyKeepDrop(rolls, 'dh', 3)).toEqual([]);
+    expect(applyKeepDrop(rolls, 'kl', 3)).toEqual([1, 2, 3]);
+    expect(applyKeepDrop(rolls, 'kh', 3)).toEqual([1, 2, 3]);
   });
 });
 
-describe('Keep/Drop', () => {
-  it('should keep lowest', () => {
-    const rolls = [1, 2, 3, 4, 5];
-    const result = applyKeepDrop(rolls, 'kl', 2);
-    expect(result).toEqual([1, 2]);
+describe('parseDiceExpression', () => {
+  it('parses positive and negative modifiers', () => {
+    const parsedPlus = parseDiceExpression('3d6 + 5');
+    expect(parsedPlus.success).toBe(true);
+    expect(parsedPlus.expression?.modifier).toBe(5);
+
+    const parsedMinus = parseDiceExpression('1d100 - 10');
+    expect(parsedMinus.success).toBe(true);
+    expect(parsedMinus.expression?.modifier).toBe(-10);
   });
-  
-  it('should keep highest', () => {
-    const rolls = [1, 2, 3, 4, 5];
-    const result = applyKeepDrop(rolls, 'kh', 2);
-    expect(result).toEqual([4, 5]);
+
+  it('parses repeat count xN and *N', () => {
+    const parsedX = parseDiceExpression('2d6 x3');
+    expect(parsedX.success).toBe(true);
+    expect(parsedX.expression?.repeat).toBe(3);
+
+    const parsedStar = parseDiceExpression('2d6 * 4');
+    expect(parsedStar.success).toBe(true);
+    expect(parsedStar.expression?.repeat).toBe(4);
   });
-  
-  it('should drop lowest', () => {
-    const rolls = [1, 2, 3, 4, 5];
-    const result = applyKeepDrop(rolls, 'dl', 2);
-    expect(result).toEqual([4, 5]);
+
+  it('parses keep and drop operators', () => {
+    const parsedDl = parseDiceExpression('5d6dl2');
+    expect(parsedDl.success).toBe(true);
+    expect(parsedDl.expression?.keepDrop).toBe('dl');
+    expect(parsedDl.expression?.keepCount).toBe(2);
+
+    const parsedKh = parseDiceExpression('4d6kh3');
+    expect(parsedKh.success).toBe(true);
+    expect(parsedKh.expression?.keepDrop).toBe('kh');
+    expect(parsedKh.expression?.keepCount).toBe(3);
   });
-  
-  it('should drop highest', () => {
-    const rolls = [1, 2, 3, 4, 5];
-    const result = applyKeepDrop(rolls, 'dh', 2);
-    expect(result).toEqual([1, 2]);
+
+  it('throws ExpressionBudgetError when budget limits are exceeded', () => {
+    expect(() => parseDiceExpression('101d6')).toThrow(ExpressionBudgetError);
+    expect(() => parseDiceExpression('1d6 x11')).toThrow(ExpressionBudgetError);
+    expect(() => parseDiceExpression('a'.repeat(2049))).toThrow(ExpressionBudgetError);
   });
-  
-  it('should return all rolls when count equals length', () => {
-    const rolls = [1, 2, 3, 4, 5];
-    const result = applyKeepDrop(rolls, 'kl', 5);
-    expect(result).toEqual([1, 2, 3, 4, 5]);
+});
+
+describe('rollDice', () => {
+  it('rolls the expected number of dice within bounds', async () => {
+    const rng = createWebCryptoRandomSource();
+    const rolls = await rollDice(6, 5, rng);
+    expect(rolls).toHaveLength(5);
+    for (const roll of rolls) {
+      expect(roll).toBeGreaterThanOrEqual(1);
+      expect(roll).toBeLessThanOrEqual(6);
+    }
+  });
+
+  it('returns empty array when count or sides is non-positive', async () => {
+    const rng = createWebCryptoRandomSource();
+    expect(await rollDice(0, 5, rng)).toEqual([]);
+    expect(await rollDice(6, 0, rng)).toEqual([]);
   });
 });

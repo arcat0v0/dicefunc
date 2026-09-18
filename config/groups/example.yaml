@@ -5,8 +5,13 @@ group:
 settings:
   ruleSet: coc7
   diceSides: 100
-  timezone: Asia/Shanghai
+  flavor: classic
   enabled: true
+mutableSettings:
+  - ruleSet
+  - diceSides
+  - flavor
+  - enabled
 overrides: {}
 permissions:
   allowCharacterSharing: false

@@ -1,43 +1,43 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
+  "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "dicefunc-worker",
-  "main": "apps/worker/src/index.ts",
-  "compatibilityDate": "2026-09-18",
-  "compatibilityFlags": ["nodejs_compat"],
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-18",
   "observability": {
     "logs": {
       "enabled": true,
-      "level": 2
+      "invocation_logs": false,
+      "head_sampling_rate": 1
     }
   },
   "vars": {
     "ENVIRONMENT": "development"
   },
+  "triggers": {
+    "crons": ["*/2 * * * *"]
+  },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "dicefunc-db",
-      "database_id": "",
-      "preview_database_id": ""
+      "database_id": "REPLACE_ME_D1_ID",
+      "migrations_dir": "../../migrations"
     }
   ],
   "kv_namespaces": [
     {
       "binding": "CONFIG_KV",
-      "id": "",
-      "preview_id": ""
+      "id": "REPLACE_ME_KV_ID"
     }
   ],
   "r2_buckets": [
     {
       "binding": "STORY_LOG_BUCKET",
-      "bucket_name": "dicefunc-story-logs",
-      "preview_bucket_name": ""
+      "bucket_name": "dicefunc-story-logs"
     },
     {
       "binding": "CONFIG_BUCKET",
-      "bucket_name": "dicefunc-config",
-      "preview_bucket_name": ""
+      "bucket_name": "dicefunc-config"
     }
   ],
   "queues": {
@@ -57,14 +57,14 @@
         "max_batch_size": 10,
         "max_concurrency": 2,
         "max_retries": 3,
-        "deadLetterQueue": "command-dlq"
+        "dead_letter_queue": "command-dlq"
       },
       {
         "queue": "archive-queue",
         "max_batch_size": 5,
         "max_concurrency": 1,
         "max_retries": 5,
-        "deadLetterQueue": "archive-dlq"
+        "dead_letter_queue": "archive-dlq"
       }
     ]
   },
