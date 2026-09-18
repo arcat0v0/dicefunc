@@ -135,24 +135,132 @@ pnpm test:runtime
 pnpm dev:worker
 ```
 
+## 部署流程
+
+### 0. 前置条件
+
+- Node.js ≥ 22、pnpm 9
+- Cloudflare 账号：**Queues 消费与 R2 需要 Workers Paid 计划**（约 $5/月）；D1、KV、Cron 免费额度即可
+- QQ 开放平台机器人（webhook 接入模式），完成基础资料审核
+
+### 1. 安装依赖并通过质量门槛
+
+```bash
+git clone <repo> && cd dicefunc
+pnpm install
+pnpm check              # tsc -b + biome + 配置检查
+pnpm test:integration   # 真实 workerd 上的 D1/R2/KV/Queues 集成测试
+```
+
+### 2. 创建 Cloudflare 资源
+
+以下命令均带 `-c apps/worker/wrangler.jsonc`，资源名与 wrangler.jsonc 中绑定一致：
+
+```bash
+# D1 数据库（记下返回的 database_id）
+wrangler d1 create dicefunc-db -c apps/worker/wrangler.jsonc
+
+# KV 命名空间（记下返回的 id）
+wrangler kv namespace create CONFIG_KV -c apps/worker/wrangler.jsonc
+
+# R2 私有桶（禁止开启公共访问）
+wrangler r2 bucket create dicefunc-story-logs -c apps/worker/wrangler.jsonc
+wrangler r2 bucket create dicefunc-config -c apps/worker/wrangler.jsonc
+
+# 队列与死信队列
+wrangler queues create command-queue -c apps/worker/wrangler.jsonc
+wrangler queues create command-dlq -c apps/worker/wrangler.jsonc
+wrangler queues create archive-queue -c apps/worker/wrangler.jsonc
+wrangler queues create archive-dlq -c apps/worker/wrangler.jsonc
+```
+
+把 `apps/worker/wrangler.jsonc` 中的 `REPLACE_ME_D1_ID`、`REPLACE_ME_KV_ID` 替换为上面返回的真实 ID。
+
+### 3. 执行数据库迁移
+
+```bash
+# 远程库
+wrangler d1 migrations apply dicefunc-db --remote -c apps/worker/wrangler.jsonc
+
+# 本地开发库（首次 wrangler dev 前执行一次）
+wrangler d1 migrations apply dicefunc-db --local -c apps/worker/wrangler.jsonc
+```
+
+迁移脚本位于 `migrations/`，由 Wrangler 迁移体系管理，共 21 张表（含 `commit_guards` 事务守卫表）。
+
+### 4. 准备 QQ 机器人密钥
+
+1. 在 [QQ 开放平台](https://q.qq.com) 创建应用，记录 **App ID** 与 **App Secret**；
+2. 生成 Ed25519 密钥对（公钥填到 QQ 平台后台，私钥用于 `op=13` 回调验证应答）：
+
+```bash
+node --input-type=module -e "
+const kp = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+const toHex = (b) => Buffer.from(b).toString('hex');
+console.log('public :', toHex(await crypto.subtle.exportKey('raw', kp.publicKey)));
+console.log('private:', toHex(await crypto.subtle.exportKey('pkcs8', kp.privateKey)));
+"
+```
+
+公钥为 raw 32 字节 hex，私钥为 pkcs8 hex；两者分别填入 QQ 平台后台与 `QQ_ED25519_PUBLIC_KEY` / `QQ_ED25519_PRIVATE_KEY`。
+
+3. 在 QQ 平台后台填入公钥并开启 webhook，回调地址填 `https://<你的 Worker 域名>/webhooks/qq`（Worker 域名在首次部署后获得，可先填占位再回来更新）。
+
+### 5. 配置 Secrets
+
+```bash
+for s in QQ_APP_ID QQ_APP_SECRET QQ_ED25519_PUBLIC_KEY QQ_ED25519_PRIVATE_KEY; do
+  wrangler secret put "$s" -c apps/worker/wrangler.jsonc
+done
+```
+
+本地开发不推送 Secrets，改为在 `apps/worker/.dev.vars` 写入同名键值（该文件已被 `.gitignore` 排除）。
+
+### 6. 部署
+
+```bash
+pnpm deploy:worker
+curl https://<你的 Worker 域名>/health   # 期望返回 ok
+```
+
+### 7. 验证 QQ 链路
+
+1. 在 QQ 平台点击"校验"完成回调地址验证（Worker 用私钥签名 `plain_token` 应答）；
+2. 在群里 @机器人 发送 `.r 1d100`，应收到掷骰回复；
+3. 观察运行日志：`wrangler tail -c apps/worker/wrangler.jsonc`；
+4. 失败任务自动重试并进入死信队列；`scheduled`（每 2 分钟 cron）自动补投遗漏任务、按保留期清理执行恢复数据。
+
+### 8. 日常迭代
+
+```bash
+# 代码变更
+pnpm check && pnpm test:integration
+pnpm deploy:worker
+
+# 配置变更（YAML 校验与编译）
+pnpm dice config check --dir ./config
+```
+
+注意：配置包的运行时发布（KV/R2 versioned，P6）尚未实现；当前规则、模板等 YAML 变更由 CLI 校验，Worker 行为以代码内注册内容为准。
+
 ## 云资源与配置
 
-### 必需 Secrets 与环境变量
+### Secrets 与环境变量
 
 - `ENVIRONMENT` - 运行环境（`production` / `staging` / `development`）
-- `QQ_APP_ID` - QQ 开放平台应用 ID
-- `QQ_APP_SECRET` - QQ 开放平台应用密钥
-- `QQ_ED25519_PUBLIC_KEY` - QQ Webhook 验签公钥
-- `QQ_ED25519_PRIVATE_KEY` - QQ 校验应答私钥
+- `QQ_APP_ID` - QQ 开放平台应用 ID（同时作为单实例 botId）
+- `QQ_APP_SECRET` - QQ 开放平台应用密钥（OpenAPI access token 获取）
+- `QQ_ED25519_PUBLIC_KEY` - Webhook 事件验签公钥（raw 32 字节 hex）
+- `QQ_ED25519_PRIVATE_KEY` - `op=13` 应答签名私钥（raw seed 或 pkcs8 hex）
 
 ### Cloudflare 资源绑定
 
-- `DB` - Cloudflare D1 数据库
-- `CONFIG_KV` - Cloudflare KV 命名空间（配置缓存）
-- `STORY_LOG_BUCKET` - Cloudflare R2 私有存储桶（跑团日志分片与归档）
-- `CONFIG_BUCKET` - Cloudflare R2 私有存储桶（P6 可选，版本化配置发布）
-- `COMMAND_QUEUE` - Cloudflare Queues 命令任务队列
-- `ARCHIVE_QUEUE` - Cloudflare Queues 归档任务队列
+- `DB` - Cloudflare D1 数据库（业务状态唯一权威存储）
+- `CONFIG_KV` - KV 命名空间（配置缓存；配置发布为 P6 能力）
+- `STORY_LOG_BUCKET` - R2 私有桶（跑团日志分片与归档）
+- `CONFIG_BUCKET` - R2 私有桶（P6 可选，版本化配置发布）
+- `COMMAND_QUEUE` / `command-dlq` - 命令任务队列与死信
+- `ARCHIVE_QUEUE` / `archive-dlq` - 归档任务队列与死信
 
 ## 文档指引
 
