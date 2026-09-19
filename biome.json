@@ -30,7 +30,8 @@
       "**/wrangler.jsonc",
       "migrations/**",
       "config/**",
-      "docs/**"
+      "docs/**",
+      "sealdice-core/**"
     ]
   }
 }

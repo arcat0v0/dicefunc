@@ -14,10 +14,17 @@ export {
 export * from './domain/character/sheet.js';
 export * from './domain/policy/policy.js';
 export * from './domain/deck/deck.js';
+export * from './domain/deck/builtin-decks.js';
+export * from './domain/reply/custom-reply.js';
+export * from './domain/template/renderer.js';
 export * from './domain/story-log/log.js';
 export * from './domain/dice/expression.js';
 export * from './domain/dice/parser.js';
 export * from './domain/rules/coc7/check.js';
+export * from './domain/rules/coc7/character-gen.js';
+export * from './domain/rules/dnd5e/combat.js';
+export * from './domain/rules/dnd5e/character-state.js';
+export * from './domain/rules/dnd5e/character-gen.js';
 
 export * from './application/commands.js';
 export { CommandExecutor } from './application/execute-command.js';

@@ -250,11 +250,12 @@ export class D1StateStore implements StateStore {
       principalId = prinRow.id;
     }
 
-    const [activeLogRes, bindingRes, policyRes] = await this.db.batch([
+    const [activeLogRes, bindingRes, policyRes, encounterRes, deckRes] = await this.db.batch([
       this.db
         .prepare(`
-        SELECT id FROM story_logs
+        SELECT id, name, status, revision FROM story_logs
         WHERE bot_id = ?1 AND conversation_id = ?2 AND status IN ('new', 'recording', 'paused')
+        ORDER BY created_at DESC
         LIMIT 1
       `)
         .bind(scope.botId, conversationId),
@@ -277,11 +278,100 @@ export class D1StateStore implements StateStore {
         )
       `)
         .bind(scope.botId, scope.externalId, scope.principal.externalId, principalId),
+      this.db
+        .prepare(`
+        SELECT id, conversation_id, state, version
+        FROM encounters
+        WHERE bot_id = ?1 AND conversation_id = ?2
+        LIMIT 1
+      `)
+        .bind(scope.botId, conversationId),
+      this.db
+        .prepare(`
+        SELECT id, deck_id, remaining, version
+        FROM deck_sessions
+        WHERE bot_id = ?1 AND conversation_id = ?2
+      `)
+        .bind(scope.botId, conversationId),
     ]);
 
-    const activeLogRow = ((activeLogRes?.results?.[0] as unknown) ?? null) as { id: string } | null;
+    const activeLogRow = ((activeLogRes?.results?.[0] as unknown) ?? null) as {
+      id: string;
+      name: string;
+      status: 'new' | 'recording' | 'paused' | 'closed';
+      revision: number;
+    } | null;
+    let activeStoryLog:
+      | {
+          readonly id: string;
+          readonly name: string;
+          readonly status: 'new' | 'recording' | 'paused' | 'closed';
+          readonly version: number;
+        }
+      | undefined;
     if (activeLogRow) {
       conversation = { ...conversation, activeLogId: activeLogRow.id };
+      activeStoryLog = {
+        id: activeLogRow.id,
+        name: activeLogRow.name,
+        status: activeLogRow.status,
+        version: activeLogRow.revision,
+      };
+    }
+
+    const encounterRow = ((encounterRes?.results?.[0] as unknown) ?? null) as {
+      id: string;
+      conversation_id: string;
+      state: string;
+      version: number;
+    } | null;
+    let encounter:
+      | {
+          readonly id: string;
+          readonly conversationId: string;
+          readonly state: unknown;
+          readonly version: number;
+        }
+      | undefined;
+    if (encounterRow) {
+      let parsedEncounterState: unknown = {};
+      try {
+        parsedEncounterState = JSON.parse(encounterRow.state);
+      } catch {}
+      encounter = {
+        id: encounterRow.id,
+        conversationId: encounterRow.conversation_id,
+        state: parsedEncounterState,
+        version: encounterRow.version,
+      };
+    }
+
+    const deckRows = (deckRes?.results ?? []) as Array<{
+      id: string;
+      deck_id: string;
+      remaining: string;
+      version: number;
+    }>;
+    const deckSessions: Record<
+      string,
+      {
+        readonly id: string;
+        readonly remaining: readonly unknown[];
+        readonly drawnCount: number;
+        readonly version: number;
+      }
+    > = {};
+    for (const dRow of deckRows) {
+      let remainingCards: unknown[] = [];
+      try {
+        remainingCards = JSON.parse(dRow.remaining);
+      } catch {}
+      deckSessions[dRow.deck_id] = {
+        id: dRow.id,
+        remaining: remainingCards,
+        drawnCount: 0,
+        version: dRow.version,
+      };
     }
 
     const bindingRow = ((bindingRes?.results?.[0] as unknown) ?? null) as {
@@ -387,6 +477,9 @@ export class D1StateStore implements StateStore {
       ...(sheet !== undefined ? { sheet } : {}),
       policyEntries,
       permissions,
+      ...(activeStoryLog !== undefined ? { activeStoryLog } : {}),
+      ...(encounter !== undefined ? { encounter } : {}),
+      deckSessions,
     };
   }
 
@@ -434,7 +527,7 @@ export class D1StateStore implements StateStore {
           this.db
             .prepare(`
             INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
-            SELECT ?1, ?2, 'character', ?3, ?4, COALESCE((SELECT version FROM character_sheets WHERE bot_id = ?1 AND id = ?3), -1)
+            SELECT ?1, ?2, 'character', ?3, ?4, COALESCE((SELECT version FROM character_sheets WHERE bot_id = ?1 AND id = ?3), CASE WHEN ?4 = 0 THEN 0 ELSE -1 END)
           `)
             .bind(plan.botId, plan.transactionId, update.sheetId, update.expectedVersion),
         );
@@ -444,25 +537,36 @@ export class D1StateStore implements StateStore {
           update.changes.attributes !== undefined
             ? JSON.stringify(update.changes.attributes)
             : null;
+        const ownerPrincipal = update.changes.ownerPrincipal ?? 'system';
+        const ruleSet = update.changes.ruleSet ?? 'coc7';
 
         statements.push(
           this.db
             .prepare(`
-            UPDATE character_sheets
-            SET name = COALESCE(?1, name),
-                attributes = COALESCE(?2, attributes),
-                version = ?3,
-                updated_at = datetime('now')
-            WHERE bot_id = ?4 AND id = ?5
+            INSERT INTO character_sheets (id, bot_id, owner_principal, rule_set, name, attributes, version, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 'Unnamed'), COALESCE(?6, '{}'), ?7, datetime('now'), datetime('now'))
+            ON CONFLICT(bot_id, id) DO UPDATE SET
+              name = COALESCE(?5, character_sheets.name),
+              attributes = COALESCE(?6, character_sheets.attributes),
+              version = ?7,
+              updated_at = datetime('now')
           `)
-            .bind(name, attributes, update.newVersion, plan.botId, update.sheetId),
+            .bind(
+              update.sheetId,
+              plan.botId,
+              ownerPrincipal,
+              ruleSet,
+              name,
+              attributes,
+              update.newVersion,
+            ),
         );
       } else if (update.type === 'character-binding') {
         statements.push(
           this.db
             .prepare(`
             INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
-            SELECT ?1, ?2, 'binding', ?3, ?4, COALESCE((SELECT version FROM character_bindings WHERE bot_id = ?1 AND conversation_id = ?5 AND principal_id = ?6), -1)
+            SELECT ?1, ?2, 'binding', ?3, ?4, COALESCE((SELECT version FROM character_bindings WHERE bot_id = ?1 AND conversation_id = ?5 AND principal_id = ?6), CASE WHEN ?4 = 0 THEN 0 ELSE -1 END)
           `)
             .bind(
               plan.botId,
@@ -525,7 +629,7 @@ export class D1StateStore implements StateStore {
           this.db
             .prepare(`
             INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
-            SELECT ?1, ?2, 'deck', ?3, ?4, COALESCE((SELECT version FROM deck_sessions WHERE bot_id = ?1 AND id = ?3), -1)
+            SELECT ?1, ?2, 'deck', ?3, ?4, COALESCE((SELECT version FROM deck_sessions WHERE bot_id = ?1 AND id = ?3), CASE WHEN ?4 = 0 THEN 0 ELSE -1 END)
           `)
             .bind(plan.botId, plan.transactionId, update.sessionId, update.expectedVersion),
         );
@@ -533,17 +637,20 @@ export class D1StateStore implements StateStore {
         statements.push(
           this.db
             .prepare(`
-            UPDATE deck_sessions
-            SET remaining = ?1,
-                version = ?2,
-                updated_at = datetime('now')
-            WHERE bot_id = ?3 AND id = ?4
+            INSERT INTO deck_sessions (id, bot_id, conversation_id, deck_id, state, remaining, version, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, '{}', ?5, ?6, datetime('now'), datetime('now'))
+            ON CONFLICT(bot_id, id) DO UPDATE SET
+              remaining = excluded.remaining,
+              version = excluded.version,
+              updated_at = datetime('now')
           `)
             .bind(
+              update.sessionId,
+              plan.botId,
+              plan.conversationId,
+              update.sessionId,
               JSON.stringify(update.changes.remaining),
               update.newVersion,
-              plan.botId,
-              update.sessionId,
             ),
         );
       } else if (update.type === 'story-log') {
@@ -551,7 +658,7 @@ export class D1StateStore implements StateStore {
           this.db
             .prepare(`
             INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
-            SELECT ?1, ?2, 'story_log', ?3, ?4, COALESCE((SELECT version FROM story_logs WHERE bot_id = ?1 AND id = ?3), -1)
+            SELECT ?1, ?2, 'story_log', ?3, ?4, COALESCE((SELECT revision FROM story_logs WHERE bot_id = ?1 AND id = ?3), CASE WHEN ?4 = 0 THEN 0 ELSE -1 END)
           `)
             .bind(plan.botId, plan.transactionId, update.logId, update.expectedVersion),
         );
@@ -559,13 +666,50 @@ export class D1StateStore implements StateStore {
         statements.push(
           this.db
             .prepare(`
-            UPDATE story_logs
-            SET status = ?1,
-                revision = ?2,
-                updated_at = datetime('now')
-            WHERE bot_id = ?3 AND id = ?4
+            INSERT INTO story_logs (id, bot_id, conversation_id, name, status, capture_mode, revision, cursor, created_at, updated_at)
+            VALUES (?1, ?2, ?3, COALESCE(?4, 'default_log'), ?5, 'all', ?6, 0, datetime('now'), datetime('now'))
+            ON CONFLICT(bot_id, id) DO UPDATE SET
+              status = excluded.status,
+              name = COALESCE(?4, story_logs.name),
+              revision = excluded.revision,
+              updated_at = datetime('now')
           `)
-            .bind(update.changes.status, update.newVersion, plan.botId, update.logId),
+            .bind(
+              update.logId,
+              plan.botId,
+              update.conversationId ?? plan.conversationId,
+              update.changes.name ?? null,
+              update.changes.status,
+              update.newVersion,
+            ),
+        );
+      } else if (update.type === 'encounter') {
+        statements.push(
+          this.db
+            .prepare(`
+            INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
+            SELECT ?1, ?2, 'encounter', ?3, ?4, COALESCE((SELECT version FROM encounters WHERE bot_id = ?1 AND id = ?3), CASE WHEN ?4 = 0 THEN 0 ELSE -1 END)
+          `)
+            .bind(plan.botId, plan.transactionId, update.encounterId, update.expectedVersion),
+        );
+
+        statements.push(
+          this.db
+            .prepare(`
+            INSERT INTO encounters (id, bot_id, conversation_id, state, version, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), datetime('now'))
+            ON CONFLICT(bot_id, id) DO UPDATE SET
+              state = excluded.state,
+              version = excluded.version,
+              updated_at = datetime('now')
+          `)
+            .bind(
+              update.encounterId,
+              plan.botId,
+              update.conversationId,
+              JSON.stringify(update.changes.state),
+              update.newVersion,
+            ),
         );
       }
     }

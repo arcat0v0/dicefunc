@@ -10,6 +10,8 @@ import {
   CommandExecutor,
   type CommandRegistry,
   DefaultEventHandler,
+  TemplateRenderer,
+  createClassicTemplates,
   createDefaultCommandRegistry,
 } from '@dicefunc/core';
 import type { Env } from './bindings.js';
@@ -27,6 +29,7 @@ export interface WorkerDependencies {
   readonly commandRegistry: CommandRegistry;
   readonly commandExecutor: CommandExecutor;
   readonly eventHandler: DefaultEventHandler;
+  readonly templateRenderer: TemplateRenderer;
 }
 
 let cachedTokenProvider: { appId: string; provider: QQTokenProvider } | undefined;
@@ -60,7 +63,14 @@ export function createDependencies(env: Env): WorkerDependencies {
   });
   const commandRegistry = createDefaultCommandRegistry();
   const commandExecutor = new CommandExecutor(commandRegistry);
-  const eventHandler = new DefaultEventHandler(stateStore, commandExecutor);
+  const templateRenderer = new TemplateRenderer(createClassicTemplates());
+  const eventHandler = new DefaultEventHandler(
+    stateStore,
+    commandExecutor,
+    undefined,
+    undefined,
+    templateRenderer,
+  );
 
   return {
     stateStore,
@@ -72,6 +82,7 @@ export function createDependencies(env: Env): WorkerDependencies {
     commandRegistry,
     commandExecutor,
     eventHandler,
+    templateRenderer,
   };
 }
 

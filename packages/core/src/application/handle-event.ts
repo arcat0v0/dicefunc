@@ -1,3 +1,4 @@
+import { TemplateRenderer, createClassicTemplates } from '../domain/template/renderer.js';
 import { type Clock, systemClock } from '../ports/clock.js';
 import { createSeededRandomSource } from '../ports/random-source.js';
 import type {
@@ -37,17 +38,20 @@ export class DefaultEventHandler implements EventHandler {
   private readonly commandExecutor: CommandExecutor;
   private readonly clock: Clock;
   private readonly configDigest: string;
+  private readonly templateRenderer: TemplateRenderer;
 
   constructor(
     stateStore: StateStore,
     commandExecutor?: CommandExecutor,
     clock?: Clock,
     configDigest?: string,
+    templateRenderer?: TemplateRenderer,
   ) {
     this.stateStore = stateStore;
     this.commandExecutor = commandExecutor ?? new CommandExecutor();
     this.clock = clock ?? systemClock;
     this.configDigest = configDigest ?? 'v1-default-config';
+    this.templateRenderer = templateRenderer ?? new TemplateRenderer(createClassicTemplates());
   }
 
   async handle(event: VerifiedEvent): Promise<EventHandleResult> {
@@ -107,18 +111,47 @@ export class DefaultEventHandler implements EventHandler {
 
         const decision = await this.commandExecutor.execute(event, context);
 
-        const assembledReplies: PreparedReply[] = decision.replies.map((rep, idx) => ({
-          executionId,
-          part: rep.part > 0 ? rep.part : 1,
-          msgSeq: idx + 1,
-          scene: rep.scene ?? event.scene,
-          targetId: rep.targetId ?? event.externalId,
-          originMessageId: rep.originMessageId ?? event.messageId,
-          templateKey: rep.templateKey,
-          variantId: rep.variantId,
-          text: rep.text,
-          deadline,
-        }));
+        const assembledReplies: PreparedReply[] = await Promise.all(
+          decision.replies.map(async (rep, idx) => {
+            let renderedText = rep.text;
+            let variantId = rep.variantId;
+
+            if (rep.templateKey && this.templateRenderer.has(rep.templateKey)) {
+              const matchingResult =
+                decision.results.find((r) => r.kind === rep.templateKey) ?? decision.results[0];
+              const templateData = {
+                actor: {
+                  name:
+                    currentSnapshot.sheet?.name ??
+                    `用户_${event.sender.externalId.slice(-4) || '1'}`,
+                },
+                ...(matchingResult?.data ?? {}),
+              };
+              const rendered = await this.templateRenderer.render(
+                rep.templateKey,
+                templateData,
+                currentRandom,
+              );
+              if (rendered.text) {
+                renderedText = rendered.text;
+                variantId = rendered.variantId;
+              }
+            }
+
+            return {
+              executionId,
+              part: rep.part > 0 ? rep.part : 1,
+              msgSeq: idx + 1,
+              scene: rep.scene ?? event.scene,
+              targetId: rep.targetId ?? event.externalId,
+              originMessageId: rep.originMessageId ?? event.messageId,
+              templateKey: rep.templateKey,
+              variantId,
+              text: renderedText,
+              deadline,
+            };
+          }),
+        );
 
         const logItems: InboundLogItem[] = [
           {

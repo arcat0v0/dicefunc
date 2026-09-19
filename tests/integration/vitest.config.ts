@@ -9,6 +9,7 @@ export default defineWorkersConfig({
     alias: {
       '@dicefunc/core': path.resolve(__dirname, '../../packages/core/src/index.ts'),
       '@dicefunc/adapters': path.resolve(__dirname, '../../packages/adapters/src/index.ts'),
+      '@dicefunc/config': path.resolve(__dirname, '../../packages/config/src/index.ts'),
     },
   },
   test: {

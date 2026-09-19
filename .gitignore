@@ -6,6 +6,6 @@ dist/
 .env
 .env.*
 coverage/
-apps/cli/dist/
 .DS_Store
 *.tsbuildinfo
+sealdice-core/

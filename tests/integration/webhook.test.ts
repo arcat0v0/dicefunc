@@ -1,5 +1,11 @@
 import { env } from 'cloudflare:test';
-import { D1StateStore, handleQQWebhook } from '@dicefunc/adapters';
+import {
+  D1StateStore,
+  QQReplySender,
+  type QQTokenProvider,
+  handleQQWebhook,
+} from '@dicefunc/adapters';
+import { CommandExecutor, DefaultEventHandler, createDefaultCommandRegistry } from '@dicefunc/core';
 import type { JobQueue, LogEvent, RuntimeLogger } from '@dicefunc/core';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../../apps/worker/src/bindings.js';
@@ -398,7 +404,99 @@ describe('QQ Webhook handler integration', () => {
       },
       logger,
     );
-
     expect(result.status).toBe(400);
+  });
+
+  it('handles C2C command end-to-end and delivers reply to QQ user messages endpoint', async () => {
+    const jobQueue = new RecordingJobQueue();
+    const runtimeStore = new D1StateStore(env.DB);
+    let capturedUrl = '';
+    let capturedPayload: Record<string, unknown> = {};
+
+    const mockHttpClient = async (url: string, init: RequestInit): Promise<Response> => {
+      capturedUrl = url;
+      capturedPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+      return new Response(JSON.stringify({ id: 'qq_msg_delivered_c2c' }), { status: 200 });
+    };
+
+    const tokenProvider = {
+      getAccessToken: async () => 'test_access_token',
+      invalidate: () => {},
+    } as unknown as QQTokenProvider;
+
+    const replySender = new QQReplySender({
+      tokenProvider,
+      httpClient: mockHttpClient,
+    });
+
+    const executor = new CommandExecutor(createDefaultCommandRegistry());
+    const eventHandler = new DefaultEventHandler(runtimeStore, executor);
+
+    const dependencies = {
+      stateStore: runtimeStore,
+      jobQueue,
+      logger,
+      eventHandler,
+      tokenProvider,
+      replySender,
+    } as unknown as WorkerDependencies;
+
+    const workerEnv = {
+      DB: env.DB,
+      QQ_APP_ID: 'bot_c2c_e2e_test',
+      QQ_APP_SECRET: botSecret,
+      ENVIRONMENT: 'test',
+    } as unknown as Env;
+
+    const payload = {
+      op: 0,
+      id: 'evt_c2c_e2e_1',
+      t: 'C2C_MESSAGE_CREATE',
+      d: {
+        id: 'msg_c2c_e2e_1',
+        content: '.r 1d20',
+        author: {
+          user_openid: 'user_openid_c2c_e2e',
+        },
+      },
+    };
+
+    const timestamp = '1710000100';
+    const bodyBytes = new TextEncoder().encode(JSON.stringify(payload));
+    const signature = await signPayload(privateKey, timestamp, bodyBytes);
+    const waitUntil = vi.fn();
+    const app = createHttpApp(dependencies);
+
+    const response = await app.fetch(
+      new Request('https://worker.test/webhooks/qq', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Signature-Ed25519': signature,
+          'X-Signature-Timestamp': timestamp,
+        },
+        body: bodyBytes,
+      }),
+      workerEnv,
+      { waitUntil } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ret: 0, msg: 'ok' });
+    await Promise.all(waitUntil.mock.calls.map((c) => c[0]));
+    expect(capturedUrl).toBe('https://api.sgroup.qq.com/v2/users/user_openid_c2c_e2e/messages');
+    expect(capturedPayload.msg_id).toBe('msg_c2c_e2e_1');
+    expect(capturedPayload.content).toBeDefined();
+    expect(capturedPayload.msg_type).toBe(0);
+
+    const sentRow = await env.DB.prepare(
+      'SELECT status, text, scene, target_id FROM outgoing_messages WHERE bot_id = ?1 AND origin_message_id = ?2',
+    )
+      .bind(workerEnv.QQ_APP_ID, 'msg_c2c_e2e_1')
+      .first<{ status: string; text: string; scene: string; target_id: string }>();
+
+    expect(sentRow?.status).toBe('sent');
+    expect(sentRow?.scene).toBe('c2c');
+    expect(sentRow?.target_id).toBe('user_openid_c2c_e2e');
   });
 });

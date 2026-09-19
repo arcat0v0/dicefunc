@@ -40,6 +40,8 @@ export type StateUpdate =
       readonly changes: {
         readonly name?: string | undefined;
         readonly attributes?: Record<string, number> | undefined;
+        readonly ownerPrincipal?: string | undefined;
+        readonly ruleSet?: string | undefined;
       };
       readonly newVersion: number;
     }
@@ -76,9 +78,21 @@ export type StateUpdate =
   | {
       readonly type: 'story-log';
       readonly logId: string;
+      readonly conversationId?: string | undefined;
       readonly expectedVersion: number;
       readonly changes: {
-        readonly status: 'recording' | 'paused' | 'closed';
+        readonly name?: string | undefined;
+        readonly status: 'new' | 'recording' | 'paused' | 'closed';
+      };
+      readonly newVersion: number;
+    }
+  | {
+      readonly type: 'encounter';
+      readonly encounterId: string;
+      readonly conversationId: string;
+      readonly expectedVersion: number;
+      readonly changes: {
+        readonly state: unknown;
       };
       readonly newVersion: number;
     };
@@ -165,6 +179,35 @@ export interface StateSnapshot {
   readonly sheet?: CharacterSheet | undefined;
   readonly policyEntries: PolicyEntry[];
   readonly permissions: Permissions;
+  readonly activeStoryLog?:
+    | {
+        readonly id: string;
+        readonly name: string;
+        readonly status: 'new' | 'recording' | 'paused' | 'closed';
+        readonly version: number;
+      }
+    | undefined;
+  readonly encounter?:
+    | {
+        readonly id: string;
+        readonly conversationId: string;
+        readonly state: unknown;
+        readonly version: number;
+      }
+    | undefined;
+  readonly deckSessions?:
+    | Readonly<
+        Record<
+          string,
+          {
+            readonly id: string;
+            readonly remaining: readonly unknown[];
+            readonly drawnCount: number;
+            readonly version: number;
+          }
+        >
+      >
+    | undefined;
 }
 
 export interface CommitOutcome {
