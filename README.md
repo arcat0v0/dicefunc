@@ -264,7 +264,7 @@ pnpm deploy:worker                    # 重新部署（资源已存在，秒级�
 
 ## 文档指引
 
-- [完整架构设计与规划](./DESIGN.md)
+- [开发约定与架构边界](./AGENTS.md)
 - [配置管理指南](./docs/configuration.md)
 - [日志与保留规范](./docs/logging-and-retention.md)
 - [测试与验证指南](./docs/testing.md)
