@@ -8,6 +8,7 @@ export interface Principal {
   readonly scene: SceneType;
   readonly scopeId: string;
   readonly externalId: string;
+  readonly name?: string | undefined;
 }
 
 export interface VerifiedEvent {

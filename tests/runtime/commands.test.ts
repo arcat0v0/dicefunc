@@ -518,6 +518,69 @@ describe('Story log command (.log)', () => {
     expect(decision.replies[0]?.text).toContain('记录中');
   });
 });
+describe('Nickname command (.nn)', () => {
+  const executor = new CommandExecutor();
+
+  it('shows current nickname on .nn', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.nn'), ctx);
+
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('玩家的当前昵称为: <用户_xt_1>');
+  });
+
+  it('sets nickname and creates character sheet binding when none exists on .nn <name>', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.nn 阿卡特'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]?.kind).toBe('character.nn');
+    expect(decision.updates).toHaveLength(2);
+    expect(decision.replies[0]?.text).toContain('的昵称被设定为<阿卡特>');
+  });
+
+  it('updates bound character name on .nn <name>', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_1',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '哈维',
+      attributes: { 侦查: 75 },
+    });
+    const ctx = createTestContext({}, { sheet });
+    const decision = await executor.execute(createTestEvent('.nn 阿卡特'), ctx);
+
+    expect(decision.updates).toHaveLength(1);
+    const update = decision.updates[0];
+    expect(update?.type).toBe('character-sheet');
+    if (update?.type === 'character-sheet') {
+      expect(update.changes.name).toBe('阿卡特');
+    }
+    expect(decision.replies[0]?.text).toContain('<哈维>');
+    expect(decision.replies[0]?.text).toContain('的昵称被设定为<阿卡特>');
+  });
+
+  it('resets nickname on .nn clr', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_1',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '阿卡特',
+    });
+    const ctx = createTestContext({}, { sheet });
+    const decision = await executor.execute(createTestEvent('.nn clr'), ctx);
+
+    expect(decision.replies[0]?.text).toContain('已重置为<用户_xt_1>');
+  });
+
+  it('shows help text on .nn help', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.nn help'), ctx);
+
+    expect(decision.replies[0]?.text).toContain('角色名设置:');
+    expect(decision.replies[0]?.text).toContain('.nn clr // 重置回群名片');
+  });
+});
 
 describe('Check commands (.ra / .rc)', () => {
   const executor = new CommandExecutor();

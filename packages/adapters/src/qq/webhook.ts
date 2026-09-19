@@ -240,9 +240,14 @@ export async function handleQQWebhook(
         scene,
         scopeId: senderScopeId,
         externalId: senderExternalId,
+        name:
+          typeof author.username === 'string' && author.username.trim()
+            ? author.username.trim()
+            : typeof author.name === 'string' && author.name.trim()
+              ? author.name.trim()
+              : undefined,
       },
     };
-
     const claim = await deps.stateStore.claimEvent(verifiedEvent, deps.configDigest);
     if (claim.alreadyProcessed) {
       return { status: 200, body: { ret: 0, msg: 'ack' } };

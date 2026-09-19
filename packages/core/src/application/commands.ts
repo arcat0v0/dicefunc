@@ -1004,6 +1004,173 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
   };
 }
 
+async function nnHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+  const conv = context.snapshot.conversation;
+  const sheet = context.snapshot.sheet;
+  const senderId = input.sender?.externalId ?? 'unknown';
+  const defaultName = input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const currentName = sheet?.name ?? defaultName;
+  const sub = input.args[0]?.trim();
+
+  if (!sub) {
+    return {
+      results: [
+        {
+          executionId: input.executionId,
+          kind: 'character.nn',
+          ruleVersion: '1.0.0',
+          data: { name: currentName },
+        },
+      ],
+      updates: [],
+      replies: [
+        {
+          executionId: input.executionId,
+          part: 1,
+          msgSeq: 1,
+          scene: conv.scene,
+          targetId: conv.externalId,
+          originMessageId: input.messageId,
+          templateKey: 'character.nn_current',
+          text: `玩家的当前昵称为: <${currentName}>`,
+          deadline,
+        },
+      ],
+      logItems: [],
+    };
+  }
+
+  if (sub.toLowerCase() === 'help') {
+    const helpText =
+      '角色名设置:\n' +
+      '.nn // 查看当前角色名\n' +
+      '.nn <角色名> // 改为指定角色名，若有卡片不会连带修改\n' +
+      '.nn clr // 重置回群名片';
+    return {
+      results: [],
+      updates: [],
+      replies: [
+        {
+          executionId: input.executionId,
+          part: 1,
+          msgSeq: 1,
+          scene: conv.scene,
+          targetId: conv.externalId,
+          originMessageId: input.messageId,
+          templateKey: 'character.nn_help',
+          text: helpText,
+          deadline,
+        },
+      ],
+      logItems: [],
+    };
+  }
+
+  if (sub.toLowerCase() === 'clr' || sub.toLowerCase() === 'reset') {
+    const updates: StateUpdate[] = [];
+    if (sheet) {
+      updates.push({
+        type: 'character-sheet',
+        sheetId: sheet.id,
+        expectedVersion: sheet.version,
+        changes: {
+          name: defaultName,
+        },
+        newVersion: sheet.version + 1,
+      });
+    }
+    const text = `<${currentName}>(${senderId.slice(-4)})的昵称已重置为<${defaultName}>`;
+    return {
+      results: [
+        {
+          executionId: input.executionId,
+          kind: 'character.nn',
+          ruleVersion: '1.0.0',
+          data: { oldName: currentName, newName: defaultName },
+        },
+      ],
+      updates,
+      replies: [
+        {
+          executionId: input.executionId,
+          part: 1,
+          msgSeq: 1,
+          scene: conv.scene,
+          targetId: conv.externalId,
+          originMessageId: input.messageId,
+          templateKey: 'character.nn_reset',
+          text,
+          deadline,
+        },
+      ],
+      logItems: [],
+    };
+  }
+
+  const newName = sub;
+  const updates: StateUpdate[] = [];
+  if (sheet) {
+    updates.push({
+      type: 'character-sheet',
+      sheetId: sheet.id,
+      expectedVersion: sheet.version,
+      changes: {
+        name: newName,
+      },
+      newVersion: sheet.version + 1,
+    });
+  } else {
+    const newSheetId = `sheet_${senderId}_${input.timestamp.getTime()}`;
+    updates.push({
+      type: 'character-sheet',
+      sheetId: newSheetId,
+      expectedVersion: 0,
+      changes: {
+        name: newName,
+        ruleSet: conv.ruleSet,
+        attributes: {},
+      },
+      newVersion: 1,
+    });
+    updates.push({
+      type: 'character-binding',
+      conversationId: conv.id,
+      principalId: senderId,
+      expectedVersion: 0,
+      changes: { sheetId: newSheetId },
+      newVersion: 1,
+    });
+  }
+
+  const text = `<${currentName}>(${senderId.slice(-4)})的昵称被设定为<${newName}>`;
+  return {
+    results: [
+      {
+        executionId: input.executionId,
+        kind: 'character.nn',
+        ruleVersion: '1.0.0',
+        data: { oldName: currentName, newName },
+      },
+    ],
+    updates,
+    replies: [
+      {
+        executionId: input.executionId,
+        part: 1,
+        msgSeq: 1,
+        scene: conv.scene,
+        targetId: conv.externalId,
+        originMessageId: input.messageId,
+        templateKey: 'character.nn_set',
+        text,
+        deadline,
+      },
+    ],
+    logItems: [],
+  };
+}
+
 async function logHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
   const deadline = new Date(input.timestamp.getTime() + 300_000);
   const conv = context.snapshot.conversation;
@@ -1322,7 +1489,7 @@ async function checkHandler(
   const sheet = context.snapshot.sheet;
   const args = input.args;
   const senderId = input.sender?.externalId ?? 'unknown';
-  const actorName = sheet?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
   if (conv.ruleSet === 'dnd5e') {
     let skillName = '检定';
     let dc: number | undefined;
@@ -1471,7 +1638,7 @@ async function initHandler(input: CommandInput, context: CommandContext): Promis
   const conv = context.snapshot.conversation;
   const sheet = context.snapshot.sheet;
   const senderId = input.sender?.externalId ?? 'unknown';
-  const actorName = sheet?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
   const args = input.args;
   const sub = args[0]?.toLowerCase();
 
@@ -2267,7 +2434,7 @@ async function drawHandler(input: CommandInput, context: CommandContext): Promis
   const conv = context.snapshot.conversation;
   const sheet = context.snapshot.sheet;
   const senderId = input.sender?.externalId ?? 'unknown';
-  const actorName = sheet?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
   const args = input.args;
 
   let deckId = 'tarot';
@@ -2498,7 +2665,8 @@ async function cocHandler(input: CommandInput, context: CommandContext): Promise
   const deadline = new Date(input.timestamp.getTime() + 300_000);
   const conv = context.snapshot.conversation;
   const sheet = context.snapshot.sheet;
-  const actorName = sheet?.name ?? `用户_${input.sender?.externalId.slice(-4) || '1'}`;
+  const actorName =
+    sheet?.name ?? input.sender?.name ?? `用户_${input.sender?.externalId.slice(-4) || '1'}`;
   const rawCount = input.args[0];
   let count = 1;
   if (rawCount !== undefined && rawCount !== '') {
@@ -2568,7 +2736,8 @@ async function dndHandler(input: CommandInput, context: CommandContext): Promise
   const deadline = new Date(input.timestamp.getTime() + 300_000);
   const conv = context.snapshot.conversation;
   const sheet = context.snapshot.sheet;
-  const actorName = sheet?.name ?? `用户_${input.sender?.externalId.slice(-4) || '1'}`;
+  const actorName =
+    sheet?.name ?? input.sender?.name ?? `用户_${input.sender?.externalId.slice(-4) || '1'}`;
   const isModePreset =
     input.commandName.toLowerCase().startsWith('dndx') ||
     input.commandName.toLowerCase().startsWith('dnd5ex');
@@ -2840,6 +3009,17 @@ export function createDefaultCommandRegistry(): CommandRegistry {
       description: 'DND5e character generation (preset mode)',
     },
     dndHandler,
+  );
+
+  registry.register(
+    {
+      name: 'nn',
+      aliases: ['nick'],
+      permission: 'all',
+      allowedWhenDisabled: false,
+      description: 'Set or inspect player nickname',
+    },
+    nnHandler,
   );
   return registry;
 }
