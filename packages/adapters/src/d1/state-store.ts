@@ -51,6 +51,7 @@ export class D1StateStore implements StateStore {
       ON CONFLICT(bot_id, scene, external_id) DO UPDATE SET
         receive_seq = conversations.receive_seq + 1,
         updated_at = datetime('now')
+      RETURNING receive_seq
     `)
       .bind(conversationId, event.botId, event.scene, event.externalId);
 
@@ -90,20 +91,29 @@ export class D1StateStore implements StateStore {
       .bind(jobId, event.botId, event.eventId);
 
     try {
-      await this.db.batch([upsertConversationStmt, insertEventStmt, insertJobStmt]);
-
-      const seqRow = await this.db
-        .prepare(`
-        SELECT receive_seq FROM conversations WHERE bot_id = ?1 AND scene = ?2 AND external_id = ?3 LIMIT 1
-      `)
-        .bind(event.botId, event.scene, event.externalId)
-        .first<{ receive_seq: number }>();
+      const batchRes = await this.db.batch([
+        upsertConversationStmt,
+        insertEventStmt,
+        insertJobStmt,
+      ]);
+      const firstRes = batchRes[0];
+      let conversationSeq = 1;
+      if (
+        firstRes?.results?.[0] &&
+        typeof firstRes.results[0] === 'object' &&
+        'receive_seq' in firstRes.results[0]
+      ) {
+        const rawSeq = firstRes.results[0].receive_seq;
+        if (typeof rawSeq === 'number') {
+          conversationSeq = rawSeq;
+        }
+      }
 
       return {
         eventId: event.eventId,
         messageKey,
         conversationId,
-        conversationSeq: seqRow?.receive_seq ?? 1,
+        conversationSeq,
         seed,
         jobId,
         status: 'claimed',
@@ -152,31 +162,50 @@ export class D1StateStore implements StateStore {
   }
 
   async loadSnapshot(scope: CommandScope): Promise<StateSnapshot> {
-    const convRow = await this.db
-      .prepare(`
-      SELECT id, bot_id, scene, external_id, rule_set, dice_sides, enabled, version, created_at, updated_at
-      FROM conversations
-      WHERE bot_id = ?1 AND scene = ?2 AND external_id = ?3
-      LIMIT 1
-    `)
-      .bind(scope.botId, scope.scene, scope.externalId)
-      .first<{
-        id: string;
-        bot_id: string;
-        scene: string;
-        external_id: string;
-        rule_set: string;
-        dice_sides: number;
-        enabled: number;
-        version: number;
-        created_at: string;
-        updated_at: string;
-      }>();
+    const [convRes, prinRes] = await this.db.batch([
+      this.db
+        .prepare(`
+        SELECT id, bot_id, scene, external_id, rule_set, dice_sides, enabled, version, created_at, updated_at
+        FROM conversations
+        WHERE bot_id = ?1 AND scene = ?2 AND external_id = ?3
+        LIMIT 1
+      `)
+        .bind(scope.botId, scope.scene, scope.externalId),
+      this.db
+        .prepare(`
+        SELECT id FROM principals
+        WHERE bot_id = ?1 AND scene = ?2 AND scope_id = ?3 AND external_id = ?4
+        LIMIT 1
+      `)
+        .bind(
+          scope.botId,
+          scope.principal.scene,
+          scope.principal.scopeId,
+          scope.principal.externalId,
+        ),
+    ]);
 
+    const convRow = ((convRes?.results?.[0] as unknown) ?? null) as {
+      id: string;
+      bot_id: string;
+      scene: string;
+      external_id: string;
+      rule_set: string;
+      dice_sides: number;
+      enabled: number;
+      version: number;
+      created_at: string;
+      updated_at: string;
+    } | null;
+
+    const prinRow = ((prinRes?.results?.[0] as unknown) ?? null) as { id: string } | null;
+
+    let conversationId: string;
     let conversation: ConversationSession;
     if (!convRow) {
+      conversationId = `conv_${scope.botId}_${scope.scene}_${scope.externalId}`;
       conversation = createConversationSession({
-        id: `conv_${scope.botId}_${scope.scene}_${scope.externalId}`,
+        id: conversationId,
         botId: scope.botId,
         scene: scope.scene,
         externalId: scope.externalId,
@@ -185,17 +214,7 @@ export class D1StateStore implements StateStore {
         enabled: true,
       });
     } else {
-      const activeLogRow = await this.db
-        .prepare(`
-        SELECT id FROM story_logs
-        WHERE bot_id = ?1 AND conversation_id = ?2 AND status IN ('new', 'recording', 'paused')
-        LIMIT 1
-      `)
-        .bind(scope.botId, convRow.id)
-        .first<{ id: string }>();
-
-      const activeLogId = activeLogRow ? activeLogRow.id : undefined;
-
+      conversationId = convRow.id;
       conversation = {
         id: convRow.id,
         botId: convRow.bot_id,
@@ -204,21 +223,11 @@ export class D1StateStore implements StateStore {
         ruleSet: convRow.rule_set,
         diceSides: convRow.dice_sides,
         enabled: convRow.enabled === 1,
-        ...(activeLogId !== undefined ? { activeLogId } : {}),
         version: convRow.version,
         createdAt: new Date(convRow.created_at),
         updatedAt: new Date(convRow.updated_at),
       };
     }
-
-    const prinRow = await this.db
-      .prepare(`
-      SELECT id FROM principals
-      WHERE bot_id = ?1 AND scene = ?2 AND scope_id = ?3 AND external_id = ?4
-      LIMIT 1
-    `)
-      .bind(scope.botId, scope.principal.scene, scope.principal.scopeId, scope.principal.externalId)
-      .first<{ id: string }>();
 
     let principalId: string;
     if (!prinRow) {
@@ -241,14 +250,44 @@ export class D1StateStore implements StateStore {
       principalId = prinRow.id;
     }
 
-    const bindingRow = await this.db
-      .prepare(`
-      SELECT sheet_id, version FROM character_bindings
-      WHERE bot_id = ?1 AND conversation_id = ?2 AND principal_id = ?3
-      LIMIT 1
-    `)
-      .bind(scope.botId, conversation.id, principalId)
-      .first<{ sheet_id: string; version: number }>();
+    const [activeLogRes, bindingRes, policyRes] = await this.db.batch([
+      this.db
+        .prepare(`
+        SELECT id FROM story_logs
+        WHERE bot_id = ?1 AND conversation_id = ?2 AND status IN ('new', 'recording', 'paused')
+        LIMIT 1
+      `)
+        .bind(scope.botId, conversationId),
+      this.db
+        .prepare(`
+        SELECT sheet_id, version FROM character_bindings
+        WHERE bot_id = ?1 AND conversation_id = ?2 AND principal_id = ?3
+        LIMIT 1
+      `)
+        .bind(scope.botId, conversationId, principalId),
+      this.db
+        .prepare(`
+        SELECT id, scope_type, scope_id, principal_id, action, reason, version
+        FROM policy_entries
+        WHERE bot_id = ?1 AND (
+          scope_type = 'bot'
+          OR (scope_type = 'group' AND scope_id = ?2)
+          OR (scope_type = 'user' AND scope_id = ?3)
+          OR principal_id = ?4
+        )
+      `)
+        .bind(scope.botId, scope.externalId, scope.principal.externalId, principalId),
+    ]);
+
+    const activeLogRow = ((activeLogRes?.results?.[0] as unknown) ?? null) as { id: string } | null;
+    if (activeLogRow) {
+      conversation = { ...conversation, activeLogId: activeLogRow.id };
+    }
+
+    const bindingRow = ((bindingRes?.results?.[0] as unknown) ?? null) as {
+      sheet_id: string;
+      version: number;
+    } | null;
 
     let characterBinding: { readonly sheetId: string | null; readonly version: number } | undefined;
     let sheet: CharacterSheet | undefined;
@@ -299,29 +338,17 @@ export class D1StateStore implements StateStore {
       }
     }
 
-    const policyRows = await this.db
-      .prepare(`
-      SELECT id, scope_type, scope_id, principal_id, action, reason, version
-      FROM policy_entries
-      WHERE bot_id = ?1 AND (
-        scope_type = 'bot'
-        OR (scope_type = 'group' AND scope_id = ?2)
-        OR (scope_type = 'user' AND scope_id = ?3)
-        OR principal_id = ?4
-      )
-    `)
-      .bind(scope.botId, scope.externalId, scope.principal.externalId, principalId)
-      .all<{
-        id: string;
-        scope_type: string;
-        scope_id: string;
-        principal_id: string | null;
-        action: string;
-        reason: string | null;
-        version: number;
-      }>();
+    const policyRows = (policyRes?.results ?? []) as Array<{
+      id: string;
+      scope_type: string;
+      scope_id: string;
+      principal_id: string | null;
+      action: string;
+      reason: string | null;
+      version: number;
+    }>;
 
-    const policyEntries: PolicyEntry[] = (policyRows.results ?? []).map((row) => {
+    const policyEntries: PolicyEntry[] = policyRows.map((row) => {
       const scopeType: 'bot' | 'group' | 'user' =
         row.scope_type === 'bot' || row.scope_type === 'group' || row.scope_type === 'user'
           ? row.scope_type
@@ -567,8 +594,12 @@ export class D1StateStore implements StateStore {
       statements.push(
         this.db
           .prepare(`
-          INSERT INTO outgoing_messages (id, bot_id, execution_id, part, msg_seq, deadline, status, created_at, updated_at)
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', datetime('now'), datetime('now'))
+          INSERT INTO outgoing_messages (
+            id, bot_id, execution_id, part, msg_seq,
+            scene, target_id, origin_message_id, template_key, variant_id, text,
+            deadline, status, created_at, updated_at
+          )
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'pending', datetime('now'), datetime('now'))
         `)
           .bind(
             messageId,
@@ -576,6 +607,12 @@ export class D1StateStore implements StateStore {
             reply.executionId,
             reply.part,
             reply.msgSeq,
+            reply.scene,
+            reply.targetId,
+            reply.originMessageId,
+            reply.templateKey,
+            reply.variantId ?? null,
+            reply.text,
             reply.deadline.toISOString(),
           ),
       );
@@ -587,7 +624,10 @@ export class D1StateStore implements StateStore {
         this.db
           .prepare(`
           INSERT INTO story_log_items (id, bot_id, log_id, sequence_number, direction, source_id, text, delivery_status, created_at)
-          SELECT ?1, ?2, COALESCE((SELECT id FROM story_logs WHERE bot_id = ?2 AND conversation_id = ?3 AND status IN ('new', 'recording', 'paused') LIMIT 1), 'default_log'), ?4, ?5, ?6, ?7, ?8, datetime('now')
+          SELECT ?1, ?2, id, ?4, ?5, ?6, ?7, ?8, datetime('now')
+          FROM story_logs
+          WHERE bot_id = ?2 AND conversation_id = ?3 AND status IN ('new', 'recording', 'paused')
+          LIMIT 1
         `)
           .bind(
             itemId,
@@ -729,14 +769,27 @@ export class D1StateStore implements StateStore {
   }
 
   async acquireJob(botId: string, jobId: string, leaseSeconds: number): Promise<JobLease | null> {
+    const leaseToken = `lease_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+
     const row = await this.db
       .prepare(`
-      SELECT id, type, resource_id, status, attempts, max_attempts, next_attempt_at, deadline, fencing_token, lease_expires_at
-      FROM jobs
-      WHERE bot_id = ?1 AND id = ?2
-      LIMIT 1
+      UPDATE jobs
+      SET status = 'processing',
+          attempts = attempts + 1,
+          lease = ?1,
+          lease_expires_at = datetime('now', '+' || ?2 || ' seconds'),
+          fencing_token = CAST(CAST(COALESCE(fencing_token, '0') AS INTEGER) + 1 AS TEXT),
+          updated_at = datetime('now')
+      WHERE bot_id = ?3 AND id = ?4
+        AND attempts < max_attempts
+        AND status NOT IN ('completed', 'dead')
+        AND (
+          (status != 'processing' AND datetime(next_attempt_at) <= datetime('now'))
+          OR (status = 'processing' AND (lease_expires_at IS NULL OR datetime(lease_expires_at) < datetime('now')))
+        )
+      RETURNING id, type, resource_id, status, attempts, max_attempts, next_attempt_at, deadline, fencing_token, lease_expires_at
     `)
-      .bind(botId, jobId)
+      .bind(leaseToken, leaseSeconds, botId, jobId)
       .first<{
         id: string;
         type: string;
@@ -754,51 +807,13 @@ export class D1StateStore implements StateStore {
       return null;
     }
 
-    const now = new Date();
-    if (row.attempts >= row.max_attempts) {
-      return null;
-    }
-
-    if (row.status === 'completed' || row.status === 'dead') {
-      return null;
-    }
-
-    if (row.status === 'processing') {
-      if (!row.lease_expires_at || parseSqliteUtc(row.lease_expires_at) >= now) {
-        return null;
-      }
-    } else if (parseSqliteUtc(row.next_attempt_at) > now) {
-      return null;
-    }
-
-    const leaseToken = `lease_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
-    const currentFencing = Number.parseInt(String(row.fencing_token ?? '0'), 10) || 0;
-    const nextFencing = currentFencing + 1;
-
-    const updateRes = await this.db
-      .prepare(`
-      UPDATE jobs
-      SET status = 'processing',
-          attempts = attempts + 1,
-          lease = ?1,
-          lease_expires_at = datetime('now', '+' || ?2 || ' seconds'),
-          fencing_token = CAST(?3 AS TEXT),
-          updated_at = datetime('now')
-      WHERE bot_id = ?4 AND id = ?5 AND COALESCE(fencing_token, '0') = ?6
-    `)
-      .bind(leaseToken, leaseSeconds, nextFencing, botId, jobId, String(row.fencing_token ?? '0'))
-      .run();
-
-    if ((updateRes.meta.changes ?? 0) === 0) {
-      return null;
-    }
-
+    const nextFencing = Number.parseInt(String(row.fencing_token ?? '0'), 10) || 0;
     const updatedJob: StoredJob = {
       jobId: row.id,
       type: row.type as 'command' | 'archive-chunk',
       resourceId: row.resource_id,
       status: 'processing',
-      attempts: row.attempts + 1,
+      attempts: row.attempts,
       maxAttempts: row.max_attempts,
       nextAttemptAt: parseSqliteUtc(row.next_attempt_at),
       deadline: parseSqliteUtc(row.deadline),

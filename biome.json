@@ -27,6 +27,7 @@
       "**/node_modules/**",
       "**/dist/**",
       "**/.wrangler/**",
+      "**/wrangler.jsonc",
       "migrations/**",
       "config/**",
       "docs/**"

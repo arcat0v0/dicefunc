@@ -4,7 +4,7 @@ import { buildLogEntry } from '@dicefunc/core';
 import { Hono } from 'hono';
 import type { Env } from './bindings.js';
 import type { WorkerDependencies } from './index.js';
-
+import { handleCommandMessage } from './queue.js';
 export function createHttpApp(deps: WorkerDependencies): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
@@ -29,12 +29,30 @@ export function createHttpApp(deps: WorkerDependencies): Hono<{ Bindings: Env }>
       stateStore: deps.stateStore,
       queue: deps.jobQueue,
       botId: c.env.QQ_APP_ID,
-      publicKeyHex: c.env.QQ_ED25519_PUBLIC_KEY,
-      privateKeyHex: c.env.QQ_ED25519_PRIVATE_KEY,
+      botSecret: c.env.QQ_APP_SECRET ?? null,
       configDigest: 'dev-bundle',
     };
 
     const result = await handleQQWebhook(input, webhookDeps, deps.logger);
+    if (result.enqueuedJobId && result.preloaded) {
+      c.executionCtx.waitUntil(
+        handleCommandMessage(result.enqueuedJobId, undefined, c.env, deps, result.preloaded).catch(
+          (err) => {
+            deps.logger.log(
+              buildLogEntry({
+                level: 'warn',
+                event: 'qq.webhook.background_dispatch_failed',
+                component: 'qq-webhook',
+                environment: c.env.ENVIRONMENT,
+                jobId: result.enqueuedJobId,
+                outcome: 'retryable',
+                errorCode: err instanceof Error ? err.name : 'BACKGROUND_DISPATCH_ERROR',
+              }),
+            );
+          },
+        ),
+      );
+    }
 
     return new Response(JSON.stringify(result.body), {
       status: result.status,

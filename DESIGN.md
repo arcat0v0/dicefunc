@@ -116,7 +116,7 @@ P0 验证 Hono 入口、随机数、Ed25519、D1 batch 回滚、KV 读取、R2 �
 
 依赖在 P0 固定版本并核对 TS7、Workers 与许可证。表中是选型，不是已安装或已运行证明。[Hono Workers 接入](https://hono.dev/docs/getting-started/cloudflare-workers)、[Cloudflare 测试工具](https://developers.cloudflare.com/workers/testing/vitest-integration/)
 
-Hono 路由为 `POST /webhooks/qq`、`GET /health`、`GET /archives/:id`。QQ 验签使用原始字节，先于 JSON 解析。应用服务接收规范化值对象；`queue()` 与 `scheduled()` 是同一个 Worker 的独立入口，直接调用应用服务，不通过内部模拟 HTTP。
+Hono 路由为 `POST /webhooks/qq`、`GET /health`、`GET /archives/:id`。QQ 验签使用原始字节，覆盖 `timestamp + body`；按官方协议 `op=13` 回调验证请求不携带签名头，先解析 `op` 路由后再对其余事件验签。应用服务接收规范化值对象；`queue()` 与 `scheduled()` 是同一个 Worker 的独立入口，直接调用应用服务，不通过内部模拟 HTTP。
 
 ## 5. 代码目录与依赖
 
@@ -308,7 +308,7 @@ flowchart TD
 
 ### 7.1 接收、排队和顺序
 
-1. 限制方法、路径与请求体大小，读取一次原始字节验签。按官方规则处理 challenge，未知但合法事件确认并忽略。
+1. 限制方法、路径与请求体大小，读取一次原始字节；签名密钥由 AppSecret 按官方算法派生（重复填充至 32 字节 seed），验签与 `op=13` challenge 应答共用该密钥，官方向量逐字节验证。未知但合法事件确认并忽略。
 2. 核对 App、场景和事件 ID；消息唯一键包含 bot、场景、会话和 message ID。不同接收事件类型映射到同一规范化消息时复用业务去重键，不按文本哈希去重。事件没有 ID 时只使用已核实的协议字段。
 3. 在 D1 中原子保存接收记录、随机种子、配置摘要、会话接收序号和 `jobs` 任务意图。配置按摘要保存到不可变版本记录，不能只依赖未来某个 Worker 版本仍携带旧 bundled 配置。
 4. await Queues.send 成功后才返回成功 ACK；失败返回可重试响应。D1 与 Queues 不存在跨服务事务，重投需再次入队而不能因 inbox 已存在直接跳过。入队成功后更新状态失败允许重复入队。
@@ -778,8 +778,8 @@ execution:
 - [x] `simulate`: 本地环境真实模拟掷骰求值与参数解析
 
 #### QQ Webhook 适配器
-- [x] 严格 Fail-Closed Ed25519 签名验证（验签先于 JSON 解析，凭据缺失或签名无效直接 401）
-- [x] 平台回调验证：`op: 13` 回调挑战应答（Ed25519 私钥签名 `plain_token`）
+- [x] 严格 Fail-Closed Ed25519 签名验证（AppSecret 派生密钥对 `timestamp + body` 验签，凭据缺失或签名无效直接 401）
+- [x] 平台回调验证：`op: 13` 回调挑战应答（按官方算法签名 `event_ts + plain_token`，官方向量逐字节匹配）
 - [x] 消息场景映射：群聊 @ 消息（`GROUP_AT_MESSAGE_CREATE`）、C2C 私聊（`C2C_MESSAGE_CREATE`）、频道私信（`DIRECT_MESSAGE_CREATE`）
 - [x] 原子持久化：`inbox` 去重流水与 `job` 调度任务在 `StateStore` 中原子提交
 - [x] 队列极简化：`COMMAND_QUEUE` 仅传递 `{ jobId, botId }` 最小调度载荷

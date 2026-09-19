@@ -20,14 +20,14 @@
     {
       "binding": "DB",
       "database_name": "dicefunc-db",
-      "database_id": "REPLACE_ME_D1_ID",
-      "migrations_dir": "../../migrations"
+      "migrations_dir": "../../migrations",
+      "database_id": "83f8784b-0b84-4c2f-b7fe-317c357e47bd"
     }
   ],
   "kv_namespaces": [
     {
       "binding": "CONFIG_KV",
-      "id": "REPLACE_ME_KV_ID"
+      "id": "821fed15e97d4469badb8674db60674d"
     }
   ],
   "r2_buckets": [
@@ -54,8 +54,9 @@
     "consumers": [
       {
         "queue": "command-queue",
-        "max_batch_size": 10,
-        "max_concurrency": 2,
+        "max_batch_size": 1,
+        "max_batch_timeout": 0,
+        "max_concurrency": 5,
         "max_retries": 3,
         "dead_letter_queue": "command-dlq"
       },
@@ -69,6 +70,6 @@
     ]
   },
   "build": {
-    "command": "pnpm build"
+    "command": "pnpm --filter dicefunc-worker build"
   }
 }

@@ -1,5 +1,6 @@
 import type {
   Clock,
+  EventClaim,
   JobQueue,
   RuntimeLogger,
   SceneType,
@@ -18,8 +19,7 @@ export interface QQWebhookDependencies {
   readonly stateStore: StateStore;
   readonly queue: JobQueue;
   readonly botId: string;
-  readonly publicKeyHex: string | null;
-  readonly privateKeyHex: string | null;
+  readonly botSecret: string | null;
   readonly configDigest: string;
   readonly clock?: Clock | undefined;
 }
@@ -27,16 +27,38 @@ export interface QQWebhookDependencies {
 export interface QQWebhookResult {
   readonly status: number;
   readonly body: unknown;
+  readonly enqueuedJobId?: string | undefined;
+  readonly preloaded?:
+    | {
+        readonly verifiedEvent: VerifiedEvent;
+        readonly claim: EventClaim;
+      }
+    | undefined;
 }
 
-function hexToBytes(hex: string): Uint8Array {
-  const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
-  const len = clean.length;
-  const bytes = new Uint8Array(Math.floor(len / 2));
-  for (let i = 0; i < len; i += 2) {
-    bytes[i / 2] = Number.parseInt(clean.substring(i, i + 2), 16);
+const PKCS8_PREFIX = new Uint8Array([
+  0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+]);
+
+const HEX_PATTERN = /^[0-9a-f]{128}$/;
+
+function seedFromSecret(secret: string): Uint8Array {
+  let seed = new TextEncoder().encode(secret);
+  while (seed.length < 32) {
+    const doubled = new Uint8Array(seed.length * 2);
+    doubled.set(seed, 0);
+    doubled.set(seed, seed.length);
+    seed = doubled;
   }
-  return bytes;
+  return seed.slice(0, 32);
+}
+
+async function privateKeyFromSecret(secret: string): Promise<CryptoKey> {
+  const seed = seedFromSecret(secret);
+  const pkcs8 = new Uint8Array(PKCS8_PREFIX.length + 32);
+  pkcs8.set(PKCS8_PREFIX, 0);
+  pkcs8.set(seed, PKCS8_PREFIX.length);
+  return crypto.subtle.importKey('pkcs8', pkcs8, { name: 'Ed25519' }, false, ['sign']);
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -50,12 +72,67 @@ function bytesToHex(bytes: Uint8Array): string {
   return hex;
 }
 
+function hexEqualsConstantTime(expectedHex: string, providedHex: string): boolean {
+  let diff = expectedHex.length ^ providedHex.length;
+  const len = Math.max(expectedHex.length, providedHex.length);
+  for (let i = 0; i < len; i++) {
+    const a = expectedHex.charCodeAt(i) || 0;
+    const b = providedHex.charCodeAt(i) || 0;
+    diff |= a ^ b;
+  }
+  return diff === 0;
+}
+
+async function signHex(privateKey: CryptoKey, message: Uint8Array): Promise<string> {
+  const sigBuffer = await crypto.subtle.sign({ name: 'Ed25519' }, privateKey, message);
+  return bytesToHex(new Uint8Array(sigBuffer));
+}
+
 export async function handleQQWebhook(
   input: QQWebhookInput,
   deps: QQWebhookDependencies,
   logger: RuntimeLogger,
 ): Promise<QQWebhookResult> {
-  if (!input.signature || !input.timestamp || !deps.publicKeyHex) {
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(new TextDecoder().decode(input.rawBody)) as Record<string, unknown>;
+  } catch {
+    return { status: 400, body: { ret: -1, msg: 'bad request' } };
+  }
+
+  if (payload.op === 13) {
+    const d = (payload.d ?? {}) as Record<string, unknown>;
+    const plainToken = typeof d.plain_token === 'string' ? d.plain_token : '';
+    const eventTs = typeof d.event_ts === 'string' ? d.event_ts : '';
+    if (!plainToken || !eventTs) {
+      return { status: 400, body: { ret: -1, msg: 'bad request' } };
+    }
+    if (!deps.botSecret) {
+      logger.log(
+        buildLogEntry({
+          level: 'error',
+          event: 'qq.webhook.challenge_failed',
+          component: 'qq-webhook',
+          environment: 'production',
+          outcome: 'missing_credentials',
+        }),
+      );
+      return { status: 500, body: { ret: -1, msg: 'missing credentials' } };
+    }
+
+    const privateKey = await privateKeyFromSecret(deps.botSecret);
+    const sigHex = await signHex(privateKey, new TextEncoder().encode(eventTs + plainToken));
+
+    return {
+      status: 200,
+      body: {
+        plain_token: plainToken,
+        signature: sigHex,
+      },
+    };
+  }
+
+  if (!input.signature || !input.timestamp || !deps.botSecret) {
     logger.log(
       buildLogEntry({
         level: 'warn',
@@ -68,24 +145,19 @@ export async function handleQQWebhook(
     return { status: 401, body: { ret: -1, msg: 'unauthorized' } };
   }
 
-  const pubKeyBytes = hexToBytes(deps.publicKeyHex);
-  const sigBytes = hexToBytes(input.signature);
-  const tsBytes = new TextEncoder().encode(input.timestamp);
-  const rawBytes = new Uint8Array(input.rawBody);
-  const msgBytes = new Uint8Array(tsBytes.length + rawBytes.length);
-  msgBytes.set(tsBytes, 0);
-  msgBytes.set(rawBytes, tsBytes.length);
-
   let valid = false;
   try {
-    const cryptoKey = await crypto.subtle.importKey(
-      'raw',
-      pubKeyBytes,
-      { name: 'Ed25519' },
-      false,
-      ['verify'],
-    );
-    valid = await crypto.subtle.verify({ name: 'Ed25519' }, cryptoKey, sigBytes, msgBytes);
+    const providedHex = input.signature.toLowerCase();
+    if (HEX_PATTERN.test(providedHex)) {
+      const privateKey = await privateKeyFromSecret(deps.botSecret);
+      const tsBytes = new TextEncoder().encode(input.timestamp);
+      const rawBytes = new Uint8Array(input.rawBody);
+      const msgBytes = new Uint8Array(tsBytes.length + rawBytes.length);
+      msgBytes.set(tsBytes, 0);
+      msgBytes.set(rawBytes, tsBytes.length);
+      const expectedHex = await signHex(privateKey, msgBytes);
+      valid = hexEqualsConstantTime(expectedHex, providedHex);
+    }
   } catch {
     valid = false;
   }
@@ -101,63 +173,6 @@ export async function handleQQWebhook(
       }),
     );
     return { status: 401, body: { ret: -1, msg: 'invalid signature' } };
-  }
-
-  let payload: Record<string, unknown>;
-  try {
-    const decoded = new TextDecoder().decode(input.rawBody);
-    payload = JSON.parse(decoded) as Record<string, unknown>;
-  } catch {
-    return { status: 400, body: { ret: -1, msg: 'bad request' } };
-  }
-
-  if (payload.op === 13) {
-    const d = payload.d as { plain_token?: string } | undefined;
-    const plainToken = d?.plain_token;
-    if (typeof plainToken !== 'string' || !deps.privateKeyHex) {
-      logger.log(
-        buildLogEntry({
-          level: 'error',
-          event: 'qq.webhook.challenge_failed',
-          component: 'qq-webhook',
-          environment: 'production',
-          outcome: 'missing_private_key',
-        }),
-      );
-      return { status: 500, body: { ret: -1, msg: 'missing private key' } };
-    }
-
-    const rawPrivBytes = hexToBytes(deps.privateKeyHex);
-    let pkcs8Bytes: Uint8Array;
-    if (rawPrivBytes.length === 32) {
-      const prefix = new Uint8Array([
-        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
-        0x20,
-      ]);
-      pkcs8Bytes = new Uint8Array(prefix.length + 32);
-      pkcs8Bytes.set(prefix);
-      pkcs8Bytes.set(rawPrivBytes, prefix.length);
-    } else {
-      pkcs8Bytes = rawPrivBytes;
-    }
-
-    const privKey = await crypto.subtle.importKey('pkcs8', pkcs8Bytes, { name: 'Ed25519' }, false, [
-      'sign',
-    ]);
-    const sigBuffer = await crypto.subtle.sign(
-      { name: 'Ed25519' },
-      privKey,
-      new TextEncoder().encode(plainToken),
-    );
-    const sigHex = bytesToHex(new Uint8Array(sigBuffer));
-
-    return {
-      status: 200,
-      body: {
-        plain_token: plainToken,
-        signature: sigHex,
-      },
-    };
   }
 
   if (payload.op === 12) {
@@ -251,7 +266,12 @@ export async function handleQQWebhook(
         }),
       );
 
-      return { status: 200, body: { ret: 0, msg: 'ok' } };
+      return {
+        status: 200,
+        body: { ret: 0, msg: 'ok' },
+        enqueuedJobId: claim.jobId,
+        preloaded: { verifiedEvent, claim },
+      };
     } catch {
       logger.log(
         buildLogEntry({

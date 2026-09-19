@@ -4,6 +4,7 @@ import type {
   CommandCommit,
   CommandScope,
   CommitOutcome,
+  EventClaim,
   InboundLogItem,
   PreparedReply,
   StateStore,
@@ -61,6 +62,10 @@ export class DefaultEventHandler implements EventHandler {
       };
     }
 
+    return this.executeClaimed(event, claim);
+  }
+
+  async executeClaimed(event: VerifiedEvent, claim: EventClaim): Promise<EventHandleResult> {
     const scope: CommandScope = {
       botId: event.botId,
       scene: event.scene,

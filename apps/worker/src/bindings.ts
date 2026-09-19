@@ -10,6 +10,4 @@ export interface Env {
   ARCHIVE_QUEUE: Queue<QueueMessage>;
   QQ_APP_ID: string;
   QQ_APP_SECRET: string;
-  QQ_ED25519_PUBLIC_KEY: string;
-  QQ_ED25519_PRIVATE_KEY: string;
 }

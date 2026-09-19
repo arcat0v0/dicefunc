@@ -8,6 +8,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@dicefunc/core': path.resolve(__dirname, 'packages/core/src/index.ts'),
+      '@dicefunc/adapters': path.resolve(__dirname, 'packages/adapters/src/index.ts'),
     },
   },
   test: {

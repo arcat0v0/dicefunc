@@ -105,6 +105,44 @@ describe('QQReplySender integration', () => {
     expect(outcome.errorCode).toBe('HTTP_429');
   });
 
+  it('bounds a stalled QQ request and reports a retryable timeout', async () => {
+    const fakeHttpClient = async (_url: string, init: RequestInit): Promise<Response> => {
+      const signal = init.signal;
+      if (!signal) {
+        throw new Error('missing request timeout signal');
+      }
+      return await new Promise<Response>((_resolve, reject) => {
+        if (signal.aborted) {
+          reject(signal.reason);
+          return;
+        }
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    };
+
+    const sender = new QQReplySender({
+      tokenProvider: fakeTokenProvider,
+      httpClient: fakeHttpClient,
+      requestTimeoutMs: 5,
+    });
+    const reply: PreparedReply = {
+      executionId: 'exec_timeout_1',
+      part: 1,
+      msgSeq: 1,
+      scene: 'groupAt',
+      targetId: 'group_timeout',
+      originMessageId: 'msg_timeout',
+      templateKey: 'reply',
+      text: 'hello',
+      deadline: new Date(Date.now() + 60000),
+    };
+
+    const outcome = await sender.send(reply);
+
+    expect(outcome.status).toBe('retryable');
+    expect(outcome.errorCode).toBe('QQ_REQUEST_TIMEOUT');
+  });
+
   it('classifies 400 as failed', async () => {
     const fakeHttpClient = async (): Promise<Response> =>
       new Response(JSON.stringify({ message: 'bad request' }), { status: 400 });

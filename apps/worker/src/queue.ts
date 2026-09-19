@@ -1,85 +1,225 @@
 import type { ExecutionContext, Message, MessageBatch } from '@cloudflare/workers-types';
-import type { QueueMessage, SceneType, VerifiedEvent } from '@dicefunc/core';
+import type { EventClaim, QueueMessage, SceneType, VerifiedEvent } from '@dicefunc/core';
 import { buildLogEntry } from '@dicefunc/core';
 import type { Env } from './bindings.js';
 import type { WorkerDependencies } from './index.js';
 import { createDependencies } from './index.js';
 
-async function handleCommandMessage(
-  jobId: string,
-  msg: Message<QueueMessage>,
+async function deliverPendingReplies(
   env: Env,
   deps: WorkerDependencies,
-): Promise<void> {
-  const lease = await deps.stateStore.acquireJob(env.QQ_APP_ID, jobId, 60);
-  if (!lease) {
-    msg.ack();
-    return;
-  }
-
-  const row = await env.DB.prepare(`
-    SELECT id, bot_id, event_id, message_key, conversation_seq, status, payload, config_digest, seed
-    FROM received_events
-    WHERE bot_id = ?1 AND event_id = ?2
-    LIMIT 1
+  executionId: string,
+): Promise<boolean> {
+  const rows = await env.DB.prepare(`
+    SELECT id, part, msg_seq, scene, target_id, origin_message_id, template_key, variant_id, text, deadline
+    FROM outgoing_messages
+    WHERE bot_id = ?1 AND execution_id = ?2 AND status = 'pending'
+    ORDER BY part, msg_seq
   `)
-    .bind(env.QQ_APP_ID, lease.job.resourceId)
-    .first<{
+    .bind(env.QQ_APP_ID, executionId)
+    .all<{
       id: string;
-      bot_id: string;
-      event_id: string;
-      message_key: string;
-      conversation_seq: number;
-      status: string;
-      payload: string | null;
-      config_digest: string;
-      seed: string | null;
+      part: number;
+      msg_seq: number;
+      scene: string | null;
+      target_id: string | null;
+      origin_message_id: string | null;
+      template_key: string | null;
+      variant_id: string | null;
+      text: string | null;
+      deadline: string;
     }>();
 
-  if (!row) {
-    await deps.stateStore.completeJob(
-      env.QQ_APP_ID,
-      jobId,
-      lease.fencingToken,
-      'dead',
-      'EVENT_NOT_FOUND',
-    );
-    msg.ack();
+  let allTerminal = true;
+  for (const row of rows.results) {
+    if (!row.scene || !row.target_id || !row.origin_message_id || row.text === null) {
+      await env.DB.prepare(`
+        UPDATE outgoing_messages
+        SET status = 'failed', updated_at = datetime('now')
+        WHERE bot_id = ?1 AND id = ?2 AND status = 'pending'
+      `)
+        .bind(env.QQ_APP_ID, row.id)
+        .run();
+      continue;
+    }
+
+    const outcome = await deps.replySender.send({
+      executionId,
+      part: row.part,
+      msgSeq: row.msg_seq,
+      scene: row.scene as SceneType,
+      targetId: row.target_id,
+      originMessageId: row.origin_message_id,
+      templateKey: row.template_key ?? '',
+      variantId: row.variant_id ?? undefined,
+      text: row.text,
+      deadline: new Date(row.deadline),
+    });
+
+    if (outcome.status === 'sent') {
+      await env.DB.prepare(`
+        UPDATE outgoing_messages
+        SET status = 'sent', platform_message_id = ?3, updated_at = datetime('now')
+        WHERE bot_id = ?1 AND id = ?2 AND status = 'pending'
+      `)
+        .bind(env.QQ_APP_ID, row.id, outcome.platformMessageId)
+        .run();
+    } else if (outcome.status === 'failed' || outcome.status === 'expired') {
+      await env.DB.prepare(`
+        UPDATE outgoing_messages
+        SET status = ?3, updated_at = datetime('now')
+        WHERE bot_id = ?1 AND id = ?2 AND status = 'pending'
+      `)
+        .bind(env.QQ_APP_ID, row.id, outcome.status)
+        .run();
+    } else {
+      allTerminal = false;
+    }
+  }
+  return allTerminal;
+}
+
+export async function handleCommandMessage(
+  jobId: string,
+  msg: Message<QueueMessage> | undefined,
+  env: Env,
+  deps: WorkerDependencies,
+  preloaded?: { verifiedEvent: VerifiedEvent; claim: EventClaim } | undefined,
+): Promise<void> {
+  const tokenReady = deps.tokenProvider.getAccessToken().catch(() => undefined);
+  const lease = await deps.stateStore.acquireJob(env.QQ_APP_ID, jobId, 60);
+  if (!lease) {
+    if (!msg) {
+      return;
+    }
+
+    const job = await deps.stateStore.getJob(env.QQ_APP_ID, jobId);
+    if (job && job.status !== 'completed' && job.status !== 'dead') {
+      const delaySeconds =
+        job.status === 'processing'
+          ? 60
+          : Math.min(
+              300,
+              Math.max(1, Math.ceil((job.nextAttemptAt.getTime() - Date.now()) / 1000)),
+            );
+      msg.retry({ delaySeconds });
+    } else {
+      msg.ack();
+    }
     return;
   }
 
-  const parts = row.message_key.split(':');
-  const scene = (parts[0] ?? 'groupAt') as SceneType;
-  const messageId = parts[parts.length - 1] ?? row.event_id;
-  const externalId = parts.length > 2 ? parts.slice(1, -1).join(':') : (parts[1] ?? '');
+  let verifiedEvent: VerifiedEvent;
+  let claim: EventClaim;
+  let isRowCompleted = false;
+  let eventId = lease.job.resourceId;
 
-  const verifiedEvent: VerifiedEvent = {
-    botId: row.bot_id,
-    scene,
-    eventId: row.event_id,
-    messageId,
-    externalId,
-    timestamp: new Date(),
-    text: row.payload ?? '',
-    sender: {
+  if (preloaded) {
+    verifiedEvent = preloaded.verifiedEvent;
+    claim = preloaded.claim;
+    eventId = preloaded.claim.eventId;
+  } else {
+    const row = await env.DB.prepare(`
+      SELECT id, bot_id, event_id, message_key, conversation_seq, status, payload, config_digest, seed, created_at
+      FROM received_events
+      WHERE bot_id = ?1 AND event_id = ?2
+      LIMIT 1
+    `)
+      .bind(env.QQ_APP_ID, lease.job.resourceId)
+      .first<{
+        id: string;
+        bot_id: string;
+        event_id: string;
+        message_key: string;
+        conversation_seq: number;
+        status: string;
+        payload: string | null;
+        config_digest: string;
+        seed: string | null;
+        created_at: string;
+      }>();
+
+    if (!row) {
+      await deps.stateStore.completeJob(
+        env.QQ_APP_ID,
+        jobId,
+        lease.fencingToken,
+        'dead',
+        'EVENT_NOT_FOUND',
+      );
+      msg?.ack();
+      return;
+    }
+
+    isRowCompleted = row.status === 'completed';
+    eventId = row.event_id;
+    const parts = row.message_key.split(':');
+    const scene = (parts[0] ?? 'groupAt') as SceneType;
+    const messageId = parts[parts.length - 1] ?? row.event_id;
+    const externalId = parts.length > 2 ? parts.slice(1, -1).join(':') : (parts[1] ?? '');
+
+    verifiedEvent = {
+      botId: row.bot_id,
       scene,
-      scopeId: externalId,
+      eventId: row.event_id,
+      messageId,
       externalId,
-    },
-  };
+      timestamp: new Date(row.created_at),
+      text: row.payload ?? '',
+      sender: {
+        scene,
+        scopeId: externalId,
+        externalId,
+      },
+    };
 
-  const result = await deps.eventHandler.handle(verifiedEvent);
-
-  if (result.success) {
-    await deps.stateStore.completeJob(env.QQ_APP_ID, jobId, lease.fencingToken, 'completed');
-    msg.ack();
-    return;
+    claim = {
+      eventId: row.event_id,
+      messageKey: row.message_key,
+      conversationId: `conv_${row.bot_id}_${scene}_${externalId}`,
+      conversationSeq: row.conversation_seq,
+      seed: row.seed ?? '',
+      jobId,
+      status: 'claimed',
+      alreadyProcessed: false,
+    };
+  }
+  let retryCode: string;
+  if (isRowCompleted) {
+    retryCode = '';
+  } else {
+    const result = await deps.eventHandler.executeClaimed(verifiedEvent, claim);
+    if (!result.success) {
+      retryCode = result.error?.code ?? 'EXECUTION_FAILED';
+      if (result.error?.retryable === false) {
+        await deps.stateStore.completeJob(
+          env.QQ_APP_ID,
+          jobId,
+          lease.fencingToken,
+          'dead',
+          retryCode,
+        );
+        msg?.ack();
+        return;
+      }
+    } else {
+      retryCode = '';
+    }
   }
 
-  const isRetryable =
-    result.error?.retryable !== false && lease.job.attempts < lease.job.maxAttempts;
+  if (retryCode === '') {
+    await tokenReady;
+    const executionId = `exec_${eventId}`;
+    const allTerminal = await deliverPendingReplies(env, deps, executionId);
+    if (allTerminal) {
+      await deps.stateStore.completeJob(env.QQ_APP_ID, jobId, lease.fencingToken, 'completed');
+      msg?.ack();
+      return;
+    }
+    retryCode = 'REPLY_DELIVERY_PENDING';
+  }
 
-  if (isRetryable) {
+  if (lease.job.attempts < lease.job.maxAttempts) {
     const backoffSeconds = Math.min(300, 2 ** lease.job.attempts * 5);
     await env.DB.prepare(`
       UPDATE jobs
@@ -91,18 +231,12 @@ async function handleCommandMessage(
           updated_at = datetime('now')
       WHERE bot_id = ?3 AND id = ?4 AND CAST(COALESCE(fencing_token, '0') AS INTEGER) <= ?5
     `)
-      .bind(backoffSeconds, result.error?.code ?? 'RETRY', env.QQ_APP_ID, jobId, lease.fencingToken)
+      .bind(backoffSeconds, retryCode, env.QQ_APP_ID, jobId, lease.fencingToken)
       .run();
-    msg.retry();
+    msg?.retry({ delaySeconds: backoffSeconds });
   } else {
-    await deps.stateStore.completeJob(
-      env.QQ_APP_ID,
-      jobId,
-      lease.fencingToken,
-      'dead',
-      result.error?.code ?? 'EXECUTION_FAILED',
-    );
-    msg.ack();
+    await deps.stateStore.completeJob(env.QQ_APP_ID, jobId, lease.fencingToken, 'dead', retryCode);
+    msg?.ack();
   }
 }
 

@@ -15,6 +15,7 @@ export interface QQReplySenderOptions {
   readonly clock?: Clock;
   readonly logger?: RuntimeLogger;
   readonly environment?: string;
+  readonly requestTimeoutMs?: number;
 }
 
 export class QQReplySender implements ReplySender {
@@ -24,6 +25,7 @@ export class QQReplySender implements ReplySender {
   private readonly clock: Clock;
   private readonly logger: RuntimeLogger | undefined;
   private readonly environment: string;
+  private readonly requestTimeoutMs: number;
 
   constructor(options: QQReplySenderOptions) {
     this.tokenProvider = options.tokenProvider;
@@ -32,6 +34,7 @@ export class QQReplySender implements ReplySender {
     this.clock = options.clock ?? systemClock;
     this.logger = options.logger;
     this.environment = options.environment ?? 'production';
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
   }
 
   async send(reply: PreparedReply): Promise<DeliveryOutcome> {
@@ -60,9 +63,13 @@ export class QQReplySender implements ReplySender {
     reply: PreparedReply,
     hasRetriedAuth: boolean,
   ): Promise<DeliveryOutcome> {
+    const attemptStartedAt = Date.now();
+    const tokenStartedAt = Date.now();
+    let tokenDurationMs = 0;
     let token: string;
     try {
       token = await this.tokenProvider.getAccessToken(hasRetriedAuth);
+      tokenDurationMs = Date.now() - tokenStartedAt;
     } catch {
       if (this.clock.now().getTime() > reply.deadline.getTime()) {
         return { status: 'expired' };
@@ -70,6 +77,9 @@ export class QQReplySender implements ReplySender {
       return { status: 'retryable', errorCode: 'TOKEN_FETCH_ERROR' };
     }
 
+    const requestStartedAt = Date.now();
+    let requestDurationMs = 0;
+    const requestSignal = AbortSignal.timeout(this.requestTimeoutMs);
     let response: Response;
     try {
       response = await this.httpClient(url, {
@@ -79,12 +89,35 @@ export class QQReplySender implements ReplySender {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
+        signal: requestSignal,
       });
+      requestDurationMs = Date.now() - requestStartedAt;
     } catch {
+      requestDurationMs = Date.now() - requestStartedAt;
       if (this.clock.now().getTime() > reply.deadline.getTime()) {
         return { status: 'expired' };
       }
-      return { status: 'retryable', errorCode: 'NETWORK_ERROR' };
+      const errorCode = requestSignal.aborted ? 'QQ_REQUEST_TIMEOUT' : 'NETWORK_ERROR';
+      if (this.logger) {
+        this.logger.log(
+          buildLogEntry({
+            level: 'warn',
+            event: 'qq.reply.retry',
+            component: 'reply-sender',
+            environment: this.environment,
+            executionId: reply.executionId,
+            outcome: 'retryable',
+            errorCode,
+            durationMs: Date.now() - attemptStartedAt,
+            metadata: {
+              tokenDurationMs,
+              requestDurationMs,
+              authRetry: hasRetriedAuth,
+            },
+          }),
+        );
+      }
+      return { status: 'retryable', errorCode };
     }
 
     if (response.status === 200 || response.status === 201) {
@@ -100,6 +133,12 @@ export class QQReplySender implements ReplySender {
             executionId: reply.executionId,
             outcome: 'sent',
             httpStatus: response.status,
+            durationMs: Date.now() - attemptStartedAt,
+            metadata: {
+              tokenDurationMs,
+              requestDurationMs,
+              authRetry: hasRetriedAuth,
+            },
           }),
         );
       }
@@ -130,6 +169,12 @@ export class QQReplySender implements ReplySender {
             outcome: 'failed',
             errorCode,
             httpStatus: response.status,
+            durationMs: Date.now() - attemptStartedAt,
+            metadata: {
+              tokenDurationMs,
+              requestDurationMs,
+              authRetry: hasRetriedAuth,
+            },
           }),
         );
       }
@@ -155,6 +200,12 @@ export class QQReplySender implements ReplySender {
             outcome: 'retryable',
             errorCode,
             httpStatus: response.status,
+            durationMs: Date.now() - attemptStartedAt,
+            metadata: {
+              tokenDurationMs,
+              requestDurationMs,
+              authRetry: hasRetriedAuth,
+            },
           }),
         );
       }

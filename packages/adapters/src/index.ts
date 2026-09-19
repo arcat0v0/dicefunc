@@ -8,6 +8,7 @@ export {
 export {
   QQTokenProvider,
   type QQTokenProviderOptions,
+  type TokenStorage,
 } from './qq/token-provider.js';
 
 export {

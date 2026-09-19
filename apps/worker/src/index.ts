@@ -29,16 +29,29 @@ export interface WorkerDependencies {
   readonly eventHandler: DefaultEventHandler;
 }
 
+let cachedTokenProvider: { appId: string; provider: QQTokenProvider } | undefined;
+
+function getTokenProvider(env: Env): QQTokenProvider {
+  if (cachedTokenProvider?.appId === env.QQ_APP_ID) {
+    return cachedTokenProvider.provider;
+  }
+
+  const provider = new QQTokenProvider({
+    appId: env.QQ_APP_ID,
+    clientSecret: env.QQ_APP_SECRET,
+    httpClient: globalThis.fetch.bind(globalThis),
+    storage: env.CONFIG_KV,
+  });
+  cachedTokenProvider = { appId: env.QQ_APP_ID, provider };
+  return provider;
+}
+
 export function createDependencies(env: Env): WorkerDependencies {
   const stateStore = new D1StateStore(env.DB);
   const jobQueue = new CloudflareQueuesClient(env.COMMAND_QUEUE, env.ARCHIVE_QUEUE);
   const archiveStore = new R2ArchiveStore(env.STORY_LOG_BUCKET);
   const logger = new RuntimeLoggerAdapter({ environment: env.ENVIRONMENT });
-  const tokenProvider = new QQTokenProvider({
-    appId: env.QQ_APP_ID,
-    clientSecret: env.QQ_APP_SECRET,
-    httpClient: globalThis.fetch.bind(globalThis),
-  });
+  const tokenProvider = getTokenProvider(env);
   const replySender = new QQReplySender({
     tokenProvider,
     httpClient: globalThis.fetch.bind(globalThis),
