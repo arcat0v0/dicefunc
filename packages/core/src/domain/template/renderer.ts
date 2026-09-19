@@ -89,12 +89,17 @@ export function createClassicTemplates(): TemplateRegistry {
         {
           id: 'standard',
           weight: 3,
-          text: '{{actor.name}}掷骰：{{expression}} = {{total}}\n[{{individualRolls}}]',
+          text: '{{actor.name}} 掷骰: {{expression}} = {{total}}',
+        },
+        {
+          id: 'detail',
+          weight: 2,
+          text: '{{actor.name}} 掷骰: {{expression}} = [{{individualRolls}}] = {{total}}',
         },
         {
           id: 'brief',
-          weight: 2,
-          text: '{{actor.name}}：{{total}} ({{expression}})',
+          weight: 1,
+          text: '{{actor.name}} 掷骰: {{total}} ({{expression}})',
         },
       ],
     },

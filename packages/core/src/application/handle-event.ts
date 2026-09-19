@@ -118,11 +118,16 @@ export class DefaultEventHandler implements EventHandler {
 
             if (rep.templateKey && this.templateRenderer.has(rep.templateKey)) {
               const matchingResult =
-                decision.results.find((r) => r.kind === rep.templateKey) ?? decision.results[0];
+                decision.results.find(
+                  (r) =>
+                    r.kind === rep.templateKey ||
+                    (r.kind === 'dice_roll' && rep.templateKey === 'dice.roll'),
+                ) ?? decision.results[0];
               const templateData = {
                 actor: {
                   name:
                     currentSnapshot.sheet?.name ??
+                    event.sender.name ??
                     `用户_${event.sender.externalId.slice(-4) || '1'}`,
                 },
                 ...(matchingResult?.data ?? {}),

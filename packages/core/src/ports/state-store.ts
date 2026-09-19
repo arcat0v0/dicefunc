@@ -170,6 +170,7 @@ export interface Permissions {
 }
 
 export interface StateSnapshot {
+  readonly principalId?: string | undefined;
   readonly conversation: ConversationSession;
   readonly characterBinding?:
     | {

@@ -261,12 +261,24 @@ async function rollHandler(input: CommandInput, context: CommandContext): Promis
     );
   }
 
+  const firstResult = repeatResults[0];
+  const allRolls = repeatResults.flatMap((r) => r.rolls);
+  const totalVal =
+    repeatResults.length === 1
+      ? (firstResult?.total ?? 0)
+      : repeatResults.map((r) => r.total).join(', ');
+  const rollsVal =
+    repeatResults.length === 1 ? (firstResult?.rolls.join(', ') ?? '') : allRolls.join(', ');
   const resultData: Record<string, unknown> = {
     expression: exprText,
     faces: expr.faces,
     count: expr.count,
     repeat: expr.repeat,
     repeats: repeatResults,
+    total: totalVal,
+    individualRolls: rollsVal,
+    rolls: firstResult?.rolls ?? [],
+    reason: expr.reason ?? '',
   };
 
   const commandResult: CommandResult = {
@@ -807,7 +819,7 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
     updates.push({
       type: 'character-binding',
       conversationId: conv.id,
-      principalId: senderId,
+      principalId: context.snapshot.principalId ?? senderId,
       expectedVersion: context.snapshot.characterBinding?.version ?? 0,
       changes: { sheetId },
       newVersion: (context.snapshot.characterBinding?.version ?? 0) + 1,
@@ -877,7 +889,7 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
       {
         type: 'character-binding',
         conversationId: conv.id,
-        principalId: senderId,
+        principalId: context.snapshot.principalId ?? senderId,
         expectedVersion: currentVer,
         changes: { sheetId },
         newVersion: currentVer + 1,
@@ -918,7 +930,7 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
       {
         type: 'character-binding',
         conversationId: conv.id,
-        principalId: senderId,
+        principalId: context.snapshot.principalId ?? senderId,
         expectedVersion: currentVer,
         changes: { sheetId: null },
         newVersion: currentVer + 1,
@@ -1121,6 +1133,8 @@ async function nnHandler(input: CommandInput, context: CommandContext): Promise<
       newVersion: sheet.version + 1,
     });
   } else {
+    const principalId = context.snapshot.principalId ?? senderId;
+    const currentVer = context.snapshot.characterBinding?.version ?? 0;
     const newSheetId = `sheet_${senderId}_${input.timestamp.getTime()}`;
     updates.push({
       type: 'character-sheet',
@@ -1128,6 +1142,7 @@ async function nnHandler(input: CommandInput, context: CommandContext): Promise<
       expectedVersion: 0,
       changes: {
         name: newName,
+        ownerPrincipal: senderId,
         ruleSet: conv.ruleSet,
         attributes: {},
       },
@@ -1136,13 +1151,12 @@ async function nnHandler(input: CommandInput, context: CommandContext): Promise<
     updates.push({
       type: 'character-binding',
       conversationId: conv.id,
-      principalId: senderId,
-      expectedVersion: 0,
+      principalId,
+      expectedVersion: currentVer,
       changes: { sheetId: newSheetId },
-      newVersion: 1,
+      newVersion: currentVer + 1,
     });
   }
-
   const text = `<${currentName}>(${senderId.slice(-4)})的昵称被设定为<${newName}>`;
   return {
     results: [
@@ -1613,7 +1627,12 @@ async function checkHandler(
         executionId: input.executionId,
         kind: 'coc.check',
         ruleVersion: '1.0.0',
-        data: { ...(checkResult as unknown as Record<string, unknown>) },
+        data: {
+          ...(checkResult as unknown as Record<string, unknown>),
+          skill: { name: skillName },
+          roll: { total: checkResult.rollTotal },
+          target: { value: checkResult.targetValue },
+        },
       },
     ],
     updates: [],

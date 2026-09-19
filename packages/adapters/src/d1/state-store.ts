@@ -472,6 +472,7 @@ export class D1StateStore implements StateStore {
     };
 
     return {
+      principalId,
       conversation,
       ...(characterBinding !== undefined ? { characterBinding } : {}),
       ...(sheet !== undefined ? { sheet } : {}),
@@ -523,14 +524,16 @@ export class D1StateStore implements StateStore {
             ),
         );
       } else if (update.type === 'character-sheet') {
-        statements.push(
-          this.db
-            .prepare(`
-            INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
-            SELECT ?1, ?2, 'character', ?3, ?4, COALESCE((SELECT version FROM character_sheets WHERE bot_id = ?1 AND id = ?3), CASE WHEN ?4 = 0 THEN 0 ELSE -1 END)
-          `)
-            .bind(plan.botId, plan.transactionId, update.sheetId, update.expectedVersion),
-        );
+        if (update.expectedVersion > 0) {
+          statements.push(
+            this.db
+              .prepare(`
+              INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
+              SELECT ?1, ?2, 'character', ?3, ?4, COALESCE((SELECT version FROM character_sheets WHERE bot_id = ?1 AND id = ?3), -1)
+            `)
+              .bind(plan.botId, plan.transactionId, update.sheetId, update.expectedVersion),
+          );
+        }
 
         const name = update.changes.name ?? null;
         const attributes =
@@ -562,44 +565,70 @@ export class D1StateStore implements StateStore {
             ),
         );
       } else if (update.type === 'character-binding') {
-        statements.push(
-          this.db
-            .prepare(`
-            INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
-            SELECT ?1, ?2, 'binding', ?3, ?4, COALESCE((SELECT version FROM character_bindings WHERE bot_id = ?1 AND conversation_id = ?5 AND principal_id = ?6), CASE WHEN ?4 = 0 THEN 0 ELSE -1 END)
-          `)
-            .bind(
-              plan.botId,
-              plan.transactionId,
-              `${update.conversationId}:${update.principalId}`,
-              update.expectedVersion,
-              update.conversationId,
-              update.principalId,
-            ),
-        );
+        if (update.expectedVersion > 0) {
+          statements.push(
+            this.db
+              .prepare(`
+              INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
+              SELECT ?1, ?2, 'binding', ?3, ?4, COALESCE((
+                SELECT cb.version FROM character_bindings cb
+                WHERE cb.bot_id = ?1 AND cb.conversation_id = ?5
+                  AND (cb.principal_id = ?6 OR cb.principal_id = (SELECT p.id FROM principals p WHERE p.bot_id = ?1 AND (p.id = ?6 OR p.external_id = ?6) LIMIT 1))
+              ), -1)
+            `)
+              .bind(
+                plan.botId,
+                plan.transactionId,
+                `${update.conversationId}:${update.principalId}`,
+                update.expectedVersion,
+                update.conversationId,
+                update.principalId,
+              ),
+          );
+        }
 
         const bindingId = `bind_${plan.botId}_${update.conversationId}_${update.principalId}`;
-        const sheetId = update.changes.sheetId ?? '';
 
-        statements.push(
-          this.db
-            .prepare(`
-            INSERT INTO character_bindings (id, bot_id, conversation_id, principal_id, sheet_id, version, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now'))
-            ON CONFLICT(bot_id, conversation_id, principal_id) DO UPDATE SET
-              sheet_id = excluded.sheet_id,
-              version = excluded.version,
-              updated_at = datetime('now')
-          `)
-            .bind(
-              bindingId,
-              plan.botId,
-              update.conversationId,
-              update.principalId,
-              sheetId,
-              update.newVersion,
-            ),
-        );
+        if (update.changes.sheetId === null) {
+          statements.push(
+            this.db
+              .prepare(`
+              DELETE FROM character_bindings
+              WHERE bot_id = ?1 AND conversation_id = ?2
+                AND (principal_id = ?3 OR principal_id = (SELECT p.id FROM principals p WHERE p.bot_id = ?1 AND (p.id = ?3 OR p.external_id = ?3) LIMIT 1))
+            `)
+              .bind(plan.botId, update.conversationId, update.principalId),
+          );
+        } else {
+          statements.push(
+            this.db
+              .prepare(`
+              INSERT INTO character_bindings (id, bot_id, conversation_id, principal_id, sheet_id, version, created_at, updated_at)
+              VALUES (
+                ?1,
+                ?2,
+                ?3,
+                COALESCE((SELECT p.id FROM principals p WHERE p.bot_id = ?2 AND (p.id = ?4 OR p.external_id = ?4) LIMIT 1), ?4),
+                ?5,
+                ?6,
+                datetime('now'),
+                datetime('now')
+              )
+              ON CONFLICT(bot_id, conversation_id, principal_id) DO UPDATE SET
+                sheet_id = excluded.sheet_id,
+                version = excluded.version,
+                updated_at = datetime('now')
+            `)
+              .bind(
+                bindingId,
+                plan.botId,
+                update.conversationId,
+                update.principalId,
+                update.changes.sheetId,
+                update.newVersion,
+              ),
+          );
+        }
       } else if (update.type === 'policy-entry') {
         statements.push(
           this.db
@@ -625,14 +654,16 @@ export class D1StateStore implements StateStore {
             .bind(update.changes.effect, reason, update.newVersion, plan.botId, update.entryId),
         );
       } else if (update.type === 'deck-session') {
-        statements.push(
-          this.db
-            .prepare(`
-            INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
-            SELECT ?1, ?2, 'deck', ?3, ?4, COALESCE((SELECT version FROM deck_sessions WHERE bot_id = ?1 AND id = ?3), CASE WHEN ?4 = 0 THEN 0 ELSE -1 END)
-          `)
-            .bind(plan.botId, plan.transactionId, update.sessionId, update.expectedVersion),
-        );
+        if (update.expectedVersion > 0) {
+          statements.push(
+            this.db
+              .prepare(`
+              INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
+              SELECT ?1, ?2, 'deck', ?3, ?4, COALESCE((SELECT version FROM deck_sessions WHERE bot_id = ?1 AND id = ?3), -1)
+            `)
+              .bind(plan.botId, plan.transactionId, update.sessionId, update.expectedVersion),
+          );
+        }
 
         statements.push(
           this.db
@@ -654,14 +685,16 @@ export class D1StateStore implements StateStore {
             ),
         );
       } else if (update.type === 'story-log') {
-        statements.push(
-          this.db
-            .prepare(`
-            INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
-            SELECT ?1, ?2, 'story_log', ?3, ?4, COALESCE((SELECT revision FROM story_logs WHERE bot_id = ?1 AND id = ?3), CASE WHEN ?4 = 0 THEN 0 ELSE -1 END)
-          `)
-            .bind(plan.botId, plan.transactionId, update.logId, update.expectedVersion),
-        );
+        if (update.expectedVersion > 0) {
+          statements.push(
+            this.db
+              .prepare(`
+              INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
+              SELECT ?1, ?2, 'story_log', ?3, ?4, COALESCE((SELECT revision FROM story_logs WHERE bot_id = ?1 AND id = ?3), -1)
+            `)
+              .bind(plan.botId, plan.transactionId, update.logId, update.expectedVersion),
+          );
+        }
 
         statements.push(
           this.db
@@ -684,14 +717,16 @@ export class D1StateStore implements StateStore {
             ),
         );
       } else if (update.type === 'encounter') {
-        statements.push(
-          this.db
-            .prepare(`
-            INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
-            SELECT ?1, ?2, 'encounter', ?3, ?4, COALESCE((SELECT version FROM encounters WHERE bot_id = ?1 AND id = ?3), CASE WHEN ?4 = 0 THEN 0 ELSE -1 END)
-          `)
-            .bind(plan.botId, plan.transactionId, update.encounterId, update.expectedVersion),
-        );
+        if (update.expectedVersion > 0) {
+          statements.push(
+            this.db
+              .prepare(`
+              INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
+              SELECT ?1, ?2, 'encounter', ?3, ?4, COALESCE((SELECT version FROM encounters WHERE bot_id = ?1 AND id = ?3), -1)
+            `)
+              .bind(plan.botId, plan.transactionId, update.encounterId, update.expectedVersion),
+          );
+        }
 
         statements.push(
           this.db

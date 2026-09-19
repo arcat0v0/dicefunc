@@ -149,5 +149,8 @@ describe('TemplateRenderer', () => {
     expect(reply?.templateKey).toBe('dice.roll');
     expect(reply?.variantId).toBeDefined();
     expect(reply?.text).toContain('掷骰');
+    expect(reply?.text).not.toContain('=\n[]');
+    expect(reply?.text).not.toContain('= \n[]');
+    expect(reply?.text).not.toContain('[]');
   });
 });

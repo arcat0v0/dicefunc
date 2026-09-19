@@ -499,4 +499,93 @@ describe('QQ Webhook handler integration', () => {
     expect(sentRow?.scene).toBe('c2c');
     expect(sentRow?.target_id).toBe('user_openid_c2c_e2e');
   });
+
+  it('handles .nn nickname command end-to-end and commits binding', async () => {
+    const jobQueue = new RecordingJobQueue();
+    const runtimeStore = new D1StateStore(env.DB);
+    let capturedUrl = '';
+    let capturedPayload: Record<string, unknown> = {};
+
+    const mockHttpClient = async (url: string, init: RequestInit): Promise<Response> => {
+      capturedUrl = url;
+      capturedPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+      return new Response(JSON.stringify({ id: 'qq_msg_delivered_nn' }), { status: 200 });
+    };
+
+    const tokenProvider = {
+      getAccessToken: async () => 'test_access_token',
+      invalidate: () => {},
+    } as unknown as QQTokenProvider;
+
+    const replySender = new QQReplySender({
+      tokenProvider,
+      httpClient: mockHttpClient,
+    });
+
+    const executor = new CommandExecutor(createDefaultCommandRegistry());
+    const eventHandler = new DefaultEventHandler(runtimeStore, executor);
+
+    const dependencies = {
+      stateStore: runtimeStore,
+      jobQueue,
+      logger,
+      eventHandler,
+      tokenProvider,
+      replySender,
+    } as unknown as WorkerDependencies;
+
+    const workerEnv = {
+      DB: env.DB,
+      QQ_APP_ID: 'bot_nn_e2e_test',
+      QQ_APP_SECRET: botSecret,
+      ENVIRONMENT: 'test',
+    } as unknown as Env;
+
+    const payload = {
+      op: 0,
+      id: 'evt_nn_e2e_1',
+      t: 'C2C_MESSAGE_CREATE',
+      d: {
+        id: 'msg_nn_e2e_1',
+        content: '.nn 初无',
+        author: {
+          user_openid: 'user_openid_nn_e2e',
+        },
+      },
+    };
+
+    const timestamp = '1710000200';
+    const bodyBytes = new TextEncoder().encode(JSON.stringify(payload));
+    const signature = await signPayload(privateKey, timestamp, bodyBytes);
+    const waitUntil = vi.fn();
+    const app = createHttpApp(dependencies);
+
+    const response = await app.fetch(
+      new Request('https://worker.test/webhooks/qq', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Signature-Ed25519': signature,
+          'X-Signature-Timestamp': timestamp,
+        },
+        body: bodyBytes,
+      }),
+      workerEnv,
+      { waitUntil } as never,
+    );
+
+    expect(response.status).toBe(200);
+    await Promise.all(waitUntil.mock.calls.map((c) => c[0]));
+    expect(capturedUrl).toBe('https://api.sgroup.qq.com/v2/users/user_openid_nn_e2e/messages');
+    expect(capturedPayload.content).toContain('初无');
+
+    const sentRow = await env.DB.prepare(
+      'SELECT status, text, scene, target_id FROM outgoing_messages WHERE bot_id = ?1 AND origin_message_id = ?2',
+    )
+      .bind(workerEnv.QQ_APP_ID, 'msg_nn_e2e_1')
+      .first<{ status: string; text: string; scene: string; target_id: string }>();
+
+    expect(sentRow?.status).toBe('sent');
+    expect(sentRow?.text).toContain('初无');
+  });
 });
