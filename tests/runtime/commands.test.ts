@@ -900,7 +900,7 @@ describe('Hidden roll command (.rh)', () => {
     expect(decision.replies.slice(1).every((reply) => !reply.text.includes('['))).toBe(true);
   });
 
-  it('refuses a bound group roll after active-message authorization is disabled', async () => {
+  it('attempts private delivery even when cached active-message authorization is disabled', async () => {
     const ctx = createTestContext(
       {},
       {
@@ -913,9 +913,13 @@ describe('Hidden roll command (.rh)', () => {
     );
     const decision = await executor.execute(createTestEvent('.rh d20'), ctx);
 
-    expect(decision.results).toHaveLength(0);
-    expect(ctx.budget.consumed.diceRolls).toBe(0);
-    expect(decision.replies[0]?.templateKey).toBe('dice.hidden.authorization_required');
+    expect(decision.results).toHaveLength(1);
+    expect(ctx.budget.consumed.diceRolls).toBe(1);
+    expect(decision.replies).toHaveLength(3);
+    expect(decision.replies[0]).toMatchObject({
+      scene: 'c2c',
+      deliveryMode: 'active',
+    });
   });
 
   it('returns a hidden roll result inside a C2C conversation', async () => {
@@ -959,15 +963,19 @@ describe('Hidden roll command (.rh)', () => {
 describe('Hidden roll trusted binding command (.rhbind)', () => {
   const executor = new CommandExecutor();
 
-  it('requires active-message authorization before issuing a private token', async () => {
+  it('issues a private token when the authorization event is missing or stale', async () => {
     const ctx = createTestContext(
       { scene: 'c2c', externalId: 'user_ext_1' },
       { principalId: 'c2c_principal_1', c2cActiveMessagesEnabled: false },
     );
     const decision = await executor.execute(createC2cTestEvent('.rhbind'), ctx);
 
-    expect(decision.updates).toHaveLength(0);
-    expect(decision.replies[0]?.templateKey).toBe('dice.hidden.binding.authorization_required');
+    expect(decision.updates[0]).toMatchObject({
+      type: 'hidden-roll-link-challenge',
+      c2cPrincipalId: 'c2c_principal_1',
+      userOpenid: 'user_ext_1',
+    });
+    expect(decision.replies[0]?.text).toMatch(/绑定令牌：[A-Za-z0-9_-]{43}/);
   });
 
   it('issues a single-use 256-bit binding token in C2C', async () => {
@@ -987,7 +995,7 @@ describe('Hidden roll trusted binding command (.rhbind)', () => {
     expect(token).toHaveLength(43);
   });
 
-  it('consumes a private token to bind the current group principal', async () => {
+  it('consumes a private token even when the cached authorization is disabled', async () => {
     const token = 'A'.repeat(43);
     const hiddenRollLinks: HiddenRollLinkReader = {
       findHiddenRollLinkChallenge: async () => ({
@@ -996,7 +1004,7 @@ describe('Hidden roll trusted binding command (.rhbind)', () => {
         userOpenid: 'user_c2c_1',
         version: 1,
         expiresAt: new Date(Date.now() + 600_000),
-        activeMessagesEnabled: true,
+        activeMessagesEnabled: false,
       }),
     };
     const ctx = createTestContext({}, { principalId: 'group_principal_1' }, hiddenRollLinks);

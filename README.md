@@ -85,6 +85,7 @@ dicefunc/
 - `.r [expr] [reason]` - 基础掷骰（例如 `.r 1d100`、`.r d20优势`、`.r 3d6+2 力量检定`）
 - `.rh [expr] [reason]` / `.rhd` / `.rdh` - 暗骰；C2C 中直接返回结果，群聊中仅在可信绑定后主动私聊发送，群内只报告发送成功或失败，绝不公开结果
   - 首次使用：在 QQ 启用机器人的主动消息权限，私聊发送 `.rhbind` 获取 10 分钟有效的一次性令牌，再到目标群发送 `.rhbind <令牌>`
+  - 授权事件可能因订阅时间或平台投递而缺失；`.rhbind` 不依赖本地授权缓存，实际 `.rh` 的主动私聊响应才是最终判断，失败时仍不会公开结果
   - 解除绑定：在目标群发送 `.rhbind off`
 - `.help` / `.h` / `.?` - 查看命令帮助列表
 - `.set rule <coc7|dnd5e>` - 切换当前会话规则集
@@ -207,7 +208,7 @@ npx wrangler d1 migrations apply dicefunc-db --local -c apps/worker/wrangler.jso
 然后在机器人后台的 webhook 设置页（开发设置 → 事件订阅/回调配置）：
 
 - 回调地址填 `https://<第 2 步复制的 Worker 域名>/webhooks/qq`（`workers.dev` 默认 443 端口，符合平台允许的 80/443/8080/8443）；
-- 勾选群聊 @ 消息（`GROUP_AT_MESSAGE_CREATE`）和 C2C 私聊（`C2C_MESSAGE_CREATE`）；要使用群内暗骰，还必须订阅主动消息授权变更（`C2C_MSG_RECEIVE`、`C2C_MSG_REJECT`）。
+- 勾选群聊 @ 消息（`GROUP_AT_MESSAGE_CREATE`）和 C2C 私聊（`C2C_MESSAGE_CREATE`）；建议同时订阅主动消息授权变更（`C2C_MSG_RECEIVE`、`C2C_MSG_REJECT`）以同步提示状态，但暗骰不会仅因授权事件缺失而拒绝绑定。
 
 先保存即可，"校验"按钮留到第 7 步再点。
 

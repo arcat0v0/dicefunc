@@ -925,13 +925,10 @@ export class D1StateStore implements StateStore {
                      COALESCE((
                        SELECT c.version
                        FROM hidden_roll_link_challenges c
-                       JOIN c2c_message_authorizations a
-                         ON a.bot_id = c.bot_id AND a.user_openid = c.user_openid
                        WHERE c.bot_id = ?1
                          AND c.id = ?3
                          AND c.consumed_at IS NULL
                          AND julianday(c.expires_at) > julianday('now')
-                         AND a.enabled = 1
                      ), -1)
             `)
             .bind(

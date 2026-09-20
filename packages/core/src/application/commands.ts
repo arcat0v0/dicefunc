@@ -367,10 +367,7 @@ async function hiddenRollBindingHandler(
   const updates: StateUpdate[] = [];
 
   if (conversation.scene === 'c2c') {
-    if (!context.snapshot.c2cActiveMessagesEnabled) {
-      text = '请先在 QQ 机器人资料卡开启“主动消息”，然后重新发送 .rhbind。';
-      templateKey = 'dice.hidden.binding.authorization_required';
-    } else if (input.args[0]?.toLowerCase() === 'off') {
+    if (input.args[0]?.toLowerCase() === 'off') {
       text = '请在需要解绑的群里发送 .rhbind off。';
     } else {
       const principalId = context.snapshot.principalId;
@@ -399,7 +396,7 @@ async function hiddenRollBindingHandler(
       text = binding
         ? binding.activeMessagesEnabled
           ? '本群暗骰私聊绑定有效。使用 .rh <表达式> 进行暗骰；使用 .rhbind off 解绑。'
-          : '本群已有绑定，但主动消息授权已关闭。请先在 QQ 机器人资料卡重新开启主动消息。'
+          : '本群暗骰私聊绑定有效，但本地授权状态可能未同步。可直接使用 .rh 测试实际投递；使用 .rhbind off 解绑。'
         : '请先私聊机器人发送 .rhbind 获取一次性令牌，再在本群发送 .rhbind <令牌>。';
     } else if (subcommand.toLowerCase() === 'off') {
       if (!binding) {
@@ -431,9 +428,6 @@ async function hiddenRollBindingHandler(
       if (!challenge) {
         text = '绑定令牌无效、已使用或已过期。请私聊机器人重新获取。';
         templateKey = 'dice.hidden.binding.error';
-      } else if (!challenge.activeMessagesEnabled) {
-        text = '主动消息授权已关闭。请先在 QQ 机器人资料卡重新开启，再重新获取绑定令牌。';
-        templateKey = 'dice.hidden.binding.authorization_required';
       } else {
         updates.push({
           type: 'hidden-roll-binding',
@@ -509,21 +503,6 @@ async function hiddenRollHandler(
       originMessageId: input.messageId,
       templateKey: 'dice.hidden.binding_required',
       text: '尚未绑定暗骰私聊。请先私聊机器人发送 .rhbind 获取令牌，再回本群完成绑定。',
-      deadline,
-    };
-    return { results: [], updates: [], replies: [reply], logItems: [] };
-  }
-
-  if (!binding.activeMessagesEnabled) {
-    const reply: PreparedReply = {
-      executionId: input.executionId,
-      part: 1,
-      msgSeq: 1,
-      scene: conversation.scene,
-      targetId: conversation.externalId,
-      originMessageId: input.messageId,
-      templateKey: 'dice.hidden.authorization_required',
-      text: '暗骰私聊的主动消息授权已关闭。请在 QQ 机器人资料卡重新开启后再试。',
       deadline,
     };
     return { results: [], updates: [], replies: [reply], logItems: [] };

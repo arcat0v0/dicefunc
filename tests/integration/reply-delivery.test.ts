@@ -109,7 +109,6 @@ describe('Queue consumer reply delivery integration', () => {
   it('binds group and C2C principals before delivering a hidden roll', async () => {
     const botId = 'bot_delivery_hidden_bound';
     const userId = 'user_delivery_hidden_bound';
-    await store.setC2cActiveAuthorization(botId, userId, true, 'evt_hidden_auth_enabled');
 
     const c2cEvent: VerifiedEvent = {
       ...makeEvent(botId, 'hidden_c2c_bind'),
