@@ -113,6 +113,48 @@ describe('Queue consumer reply delivery integration', () => {
     expect(msg.ack).toHaveBeenCalled();
   });
 
+  it('persists compact COC7 attribute input and delivers a concise reply', async () => {
+    const botId = 'bot_delivery_compact_st';
+    const event = {
+      ...makeEvent(botId, 'compact_st'),
+      text: '.st 力量55str55敏捷55dex55意志75pow75体质55con55外貌90app90教育50知识50edu50体型70siz70智力60灵感60int60san75san值75理智75理智值75幸运68运气68mp15魔法15hp12体力12会计5人类学1估价5考古学1取悦50攀爬30计算机5计算机使用5电脑5信用20信誉20信用评级20克苏鲁1克苏鲁神话1cm1乔装5闪避57汽车20驾驶20汽车驾驶20电气维修10电子学1话术5斗殴25手枪50急救30历史5恐吓15跳跃20中文52母语50法律5图书馆20图书馆使用20聆听52开锁1撬锁1锁匠1机械维修10医学1博物学10自然学10领航40导航40神秘学63重型操作1重型机械1操作重型机械1重型1说服10精神分析1心理学10骑术5妙手10侦查58潜行40生存10游泳20投掷20追踪10驯兽5潜水1爆破1读唇1催眠1炮术1',
+    };
+    const claim = await store.claimEvent(event, 'digest_delivery');
+    const sent: PreparedReply[] = [];
+    const msg = makeMessage(claim.jobId);
+
+    await runQueue(msg, botId, store, async (reply) => {
+      sent.push(reply);
+      return { status: 'sent', platformMessageId: 'plat_msg_compact_st' };
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.text).toMatch(/^「角色_[^」]+」的COC7属性录入完成，本次录入了\d+条数据$/);
+    expect(sent[0]?.text.length).toBeLessThan(80);
+    expect(msg.ack).toHaveBeenCalledOnce();
+
+    const row = await env.DB.prepare(
+      'SELECT attributes FROM character_sheets WHERE bot_id = ?1 LIMIT 1',
+    )
+      .bind(botId)
+      .first<{ attributes: string }>();
+    const attributes = JSON.parse(row?.attributes ?? '{}') as Record<string, number>;
+    expect(attributes).toMatchObject({
+      力量: 55,
+      敏捷: 55,
+      理智: 75,
+      生命值: 12,
+      计算机使用: 5,
+      信用评级: 20,
+      克苏鲁神话: 1,
+      汽车驾驶: 20,
+      锁匠: 1,
+      操作重型机械: 1,
+    });
+    expect(attributes).not.toHaveProperty('str');
+    expect(attributes).not.toHaveProperty('电脑');
+  });
+
   it('records both sides of an active story log with SealDice transition semantics', async () => {
     const botId = 'bot_delivery_story_log';
     const groupId = 'group_delivery_story_log';
