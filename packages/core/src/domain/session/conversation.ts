@@ -8,6 +8,7 @@ export interface ConversationSession {
   readonly ruleSet: string;
   readonly diceSides: number;
   readonly enabled: boolean;
+  readonly cocRule?: string | undefined;
   readonly activeLogId?: string | undefined;
   readonly version: number;
   readonly createdAt: Date;
@@ -22,6 +23,7 @@ export function createConversationSession(input: {
   readonly ruleSet?: string | undefined;
   readonly diceSides?: number | undefined;
   readonly enabled?: boolean | undefined;
+  readonly cocRule?: string | undefined;
   readonly activeLogId?: string | undefined;
   readonly createdAt?: Date | undefined;
 }): ConversationSession {
@@ -34,6 +36,7 @@ export function createConversationSession(input: {
     ruleSet: string;
     diceSides: number;
     enabled: boolean;
+    cocRule?: string | undefined;
     activeLogId?: string | undefined;
     version: number;
     createdAt: Date;
@@ -50,6 +53,9 @@ export function createConversationSession(input: {
     createdAt: now,
     updatedAt: now,
   };
+  if (input.cocRule !== undefined) {
+    session.cocRule = input.cocRule;
+  }
   if (input.activeLogId !== undefined) {
     session.activeLogId = input.activeLogId;
   }
@@ -62,6 +68,7 @@ export function applyConversationSettings(
     readonly ruleSet?: string | undefined;
     readonly diceSides?: number | undefined;
     readonly enabled?: boolean | undefined;
+    readonly cocRule?: string | undefined;
     readonly activeLogId?: string | undefined;
   },
   now: Date = new Date(),
@@ -69,9 +76,9 @@ export function applyConversationSettings(
   const nextRuleSet = changes.ruleSet !== undefined ? changes.ruleSet : session.ruleSet;
   const nextDiceSides = changes.diceSides !== undefined ? changes.diceSides : session.diceSides;
   const nextEnabled = changes.enabled !== undefined ? changes.enabled : session.enabled;
+  const nextCocRule = changes.cocRule !== undefined ? changes.cocRule : session.cocRule;
   const nextActiveLogId =
     changes.activeLogId !== undefined ? changes.activeLogId : session.activeLogId;
-
   const updated: {
     id: string;
     botId: string;
@@ -80,6 +87,7 @@ export function applyConversationSettings(
     ruleSet: string;
     diceSides: number;
     enabled: boolean;
+    cocRule?: string | undefined;
     activeLogId?: string | undefined;
     version: number;
     createdAt: Date;
@@ -96,6 +104,9 @@ export function applyConversationSettings(
     createdAt: session.createdAt,
     updatedAt: now,
   };
+  if (nextCocRule !== undefined) {
+    updated.cocRule = nextCocRule;
+  }
   if (nextActiveLogId !== undefined) {
     updated.activeLogId = nextActiveLogId;
   }

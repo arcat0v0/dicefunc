@@ -734,3 +734,400 @@ describe('Character generation commands (.coc / .dnd) and seamless prefix parsin
     expect(decision2.results).toHaveLength(1);
   });
 });
+
+describe('Sanity check command (.sc)', () => {
+  const executor = new CommandExecutor();
+
+  it('shows help when no args given on .sc', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.sc'), ctx);
+
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('理智检定指令：');
+  });
+
+  it('performs sanity check and decreases san on .sc 1/1d6', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_coc',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '爱德华',
+      attributes: { 理智: 60 },
+    });
+    const ctx = createTestContext({}, { sheet });
+    const decision = await executor.execute(createTestEvent('.sc 1/1d6'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]?.kind).toBe('coc.sc');
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('爱德华 的理智检定:');
+    expect(decision.replies[0]?.text).toContain('理智变化: 60 ➯');
+    expect(decision.updates).toHaveLength(1);
+    const update = decision.updates[0];
+    expect(update?.type).toBe('character-sheet');
+  });
+
+  it('produces temporary madness tip when san loss is large on .sc 10/10', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_coc',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '爱德华',
+      attributes: { 理智: 60 },
+    });
+    const ctx = createTestContext({}, { sheet });
+    const decision = await executor.execute(createTestEvent('.sc 10/10'), ctx);
+
+    expect(decision.replies[0]?.text).toContain('临时性疯狂');
+  });
+});
+
+describe('Madness symptom table commands (.ti / .li)', () => {
+  const executor = new CommandExecutor();
+
+  it('draws temporary madness symptom on .ti', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.ti'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]?.kind).toBe('coc.ti');
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('疯狂发作-即时症状');
+    expect(decision.replies[0]?.text).toContain('1D10=');
+  });
+
+  it('draws summary madness symptom on .li', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.li'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]?.kind).toBe('coc.li');
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('疯狂发作-总结症状');
+    expect(decision.replies[0]?.text).toContain('1D10=');
+  });
+});
+
+describe('Skill growth command (.en)', () => {
+  const executor = new CommandExecutor();
+
+  it('shows help when no args given on .en', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.en'), ctx);
+
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('技能成长指令：');
+  });
+
+  it('performs skill growth check on .en 侦查 with bound sheet', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_coc',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '爱德华',
+      attributes: { 侦查: 30 },
+    });
+    const ctx = createTestContext({}, { sheet });
+    const decision = await executor.execute(createTestEvent('.en 侦查'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]?.kind).toBe('coc.en');
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('爱德华');
+    expect(decision.replies[0]?.text).toContain('侦查');
+    expect(decision.replies[0]?.text).toContain('D100=');
+  });
+});
+
+describe('Death saving throws command (.ds)', () => {
+  const executor = new CommandExecutor();
+
+  it('rejects when character has HP > 0', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_dnd',
+      ownerId: 'user_ext_1',
+      ruleSet: 'dnd5e',
+      name: '格罗姆',
+      attributes: { HP: 15 },
+    });
+    const ctx = createTestContext({ ruleSet: 'dnd5e' }, { sheet });
+    const decision = await executor.execute(createTestEvent('.ds'), ctx);
+
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('生命值大于0');
+  });
+
+  it('rejects when character has no HP attribute', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_dnd',
+      ownerId: 'user_ext_1',
+      ruleSet: 'dnd5e',
+      name: '格罗姆',
+      attributes: {},
+    });
+    const ctx = createTestContext({ ruleSet: 'dnd5e' }, { sheet });
+    const decision = await executor.execute(createTestEvent('.ds'), ctx);
+
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('未设置生命值');
+  });
+
+  it('rolls death save when HP is 0', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_dnd',
+      ownerId: 'user_ext_1',
+      ruleSet: 'dnd5e',
+      name: '格罗姆',
+      attributes: { HP: 0 },
+    });
+    const ctx = createTestContext({ ruleSet: 'dnd5e' }, { sheet });
+    const decision = await executor.execute(createTestEvent('.ds'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]?.kind).toBe('dnd5e.ds');
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('死亡豁免检定: 1D20=');
+    expect(decision.updates).toHaveLength(1);
+  });
+
+  it('shows stats on .ds stat', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_dnd',
+      ownerId: 'user_ext_1',
+      ruleSet: 'dnd5e',
+      name: '格罗姆',
+      attributes: { HP: 0, DSS: 1, DSF: 2 },
+    });
+    const ctx = createTestContext({ ruleSet: 'dnd5e' }, { sheet });
+    const decision = await executor.execute(createTestEvent('.ds stat'), ctx);
+
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('当前的死亡豁免情况: 成功1 失败2');
+  });
+
+  it('supports manual adjustment on .ds s+1', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_dnd',
+      ownerId: 'user_ext_1',
+      ruleSet: 'dnd5e',
+      name: '格罗姆',
+      attributes: { HP: 0, DSS: 0, DSF: 0 },
+    });
+    const ctx = createTestContext({ ruleSet: 'dnd5e' }, { sheet });
+    const decision = await executor.execute(createTestEvent('.ds s+1'), ctx);
+
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('当前的死亡豁免情况: 成功1 失败0');
+    expect(decision.updates).toHaveLength(1);
+  });
+});
+
+describe('COC house rule switching command (.setcoc)', () => {
+  const executor = new CommandExecutor();
+
+  it('shows current house rule on .setcoc', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.setcoc'), ctx);
+
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('当前房规: 规则书规则');
+  });
+
+  it('shows all rule details on .setcoc details', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.setcoc details'), ctx);
+
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('COC房规列表：');
+    expect(decision.replies[0]?.text).toContain('DeltaGreen');
+  });
+
+  it('switches house rule on .setcoc 2', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.setcoc 2'), ctx);
+
+    expect(decision.updates).toHaveLength(1);
+    const update = decision.updates[0];
+    expect(update?.type).toBe('conversation-settings');
+    if (update?.type === 'conversation-settings') {
+      expect(update.changes.cocRule).toBe('2');
+    }
+    expect(decision.replies[0]?.text).toContain('国内常用规则');
+  });
+
+  it('switches house rule on .setcoc dg', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.setcoc dg'), ctx);
+
+    expect(decision.updates).toHaveLength(1);
+    const update = decision.updates[0];
+    expect(update?.type).toBe('conversation-settings');
+    if (update?.type === 'conversation-settings') {
+      expect(update.changes.cocRule).toBe('dg');
+    }
+    expect(decision.replies[0]?.text).toContain('DeltaGreen');
+  });
+});
+
+describe('Set command loose syntax (.set)', () => {
+  const executor = new CommandExecutor();
+
+  it('sets dice sides with single number .set 20', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.set 20'), ctx);
+
+    expect(decision.updates).toHaveLength(1);
+    const update = decision.updates[0];
+    expect(update?.type).toBe('conversation-settings');
+    if (update?.type === 'conversation-settings') {
+      expect(update.changes.diceSides).toBe(20);
+    }
+    expect(decision.replies[0]?.text).toContain('Default dice sides set to 20');
+  });
+
+  it('sets rule set with single keyword .set dnd', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.set dnd'), ctx);
+
+    expect(decision.updates).toHaveLength(1);
+    const update = decision.updates[0];
+    expect(update?.type).toBe('conversation-settings');
+    if (update?.type === 'conversation-settings') {
+      expect(update.changes.ruleSet).toBe('dnd5e');
+    }
+    expect(decision.replies[0]?.text).toContain('Rule set changed to dnd5e');
+  });
+
+  it('resets dice sides on .set clr', async () => {
+    const ctx = createTestContext({ diceSides: 20 });
+    const decision = await executor.execute(createTestEvent('.set clr'), ctx);
+
+    expect(decision.updates).toHaveLength(1);
+    const update = decision.updates[0];
+    expect(update?.type).toBe('conversation-settings');
+    if (update?.type === 'conversation-settings') {
+      expect(update.changes.diceSides).toBe(100);
+    }
+    expect(decision.replies[0]?.text).toContain('Default dice sides reset to 100');
+  });
+});
+
+describe('Character sheet dice-expression modification and threshold filter (.st)', () => {
+  const executor = new CommandExecutor();
+
+  it('filters attributes by threshold on .st show 50', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_1',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '哈维',
+      attributes: { 力量: 60, 敏捷: 40, 体质: 75 },
+    });
+    const ctx = createTestContext({}, { sheet });
+    const decision = await executor.execute(createTestEvent('.st show 50'), ctx);
+
+    expect(decision.replies[0]?.text).toContain('力量: 60');
+    expect(decision.replies[0]?.text).toContain('体质: 75');
+    expect(decision.replies[0]?.text).not.toContain('敏捷');
+  });
+
+  it('modifies attribute with dice expression on .st HP+1d4', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_1',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '哈维',
+      attributes: { HP: 10 },
+    });
+    const ctx = createTestContext({}, { sheet });
+    const decision = await executor.execute(createTestEvent('.st HP+1d4'), ctx);
+
+    expect(decision.updates).toHaveLength(1);
+    const update = decision.updates[0];
+    expect(update?.type).toBe('character-sheet');
+    if (update?.type === 'character-sheet') {
+      const hp = update.changes.attributes?.HP;
+      expect(hp).toBeGreaterThanOrEqual(11);
+      expect(hp).toBeLessThanOrEqual(14);
+    }
+    expect(decision.replies[0]?.text).toContain('HP:');
+  });
+});
+
+describe('Character sheet save and load (.pc save / .pc load)', () => {
+  const executor = new CommandExecutor();
+
+  it('saves character snapshot on .pc save <name>', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_1',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '艾莉丝',
+      attributes: { 力量: 50 },
+    });
+    const ctx = createTestContext({}, { sheet });
+    const decision = await executor.execute(createTestEvent('.pc save 战斗卡'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]?.kind).toBe('character.save');
+    expect(decision.updates).toHaveLength(1);
+    const update = decision.updates[0];
+    expect(update?.type).toBe('character-sheet');
+    if (update?.type === 'character-sheet') {
+      expect(update.changes.name).toBe('战斗卡');
+      expect(update.changes.attributes).toEqual({ 力量: 50 });
+    }
+    expect(decision.replies[0]?.text).toContain('已保存角色卡「战斗卡」');
+  });
+
+  it('binds saved character on .pc load <name>', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.pc load 战斗卡'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]?.kind).toBe('character.load');
+    expect(decision.updates).toHaveLength(1);
+    const update = decision.updates[0];
+    expect(update?.type).toBe('character-binding');
+    expect(decision.replies[0]?.text).toContain('已将当前会话绑定至角色卡「战斗卡」');
+  });
+});
+
+describe('Rule glossary search command (.find)', () => {
+  const executor = new CommandExecutor();
+
+  it('shows help when no query given on .find', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.find'), ctx);
+
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('规则查询指令：.find <关键词>');
+  });
+
+  it('finds rule glossary entries on .find 理智', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.find 理智'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]?.kind).toBe('rule.find');
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('理智检定');
+  });
+
+  it('finds rule glossary entries on .find 死亡豁免', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.find 死亡豁免'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('死亡豁免');
+  });
+
+  it('reports not found on .find 某个不存在的规则词条', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.find 某个不存在的规则词条'), ctx);
+
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('未找到与');
+  });
+});

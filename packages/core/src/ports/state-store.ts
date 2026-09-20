@@ -31,6 +31,7 @@ export type StateUpdate =
         readonly ruleSet?: string | undefined;
         readonly diceSides?: number | undefined;
         readonly enabled?: boolean | undefined;
+        readonly cocRule?: string | undefined;
       };
       readonly newVersion: number;
     }

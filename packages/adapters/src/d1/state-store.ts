@@ -165,7 +165,7 @@ export class D1StateStore implements StateStore {
     const [convRes, prinRes] = await this.db.batch([
       this.db
         .prepare(`
-        SELECT id, bot_id, scene, external_id, rule_set, dice_sides, enabled, version, created_at, updated_at
+        SELECT id, bot_id, scene, external_id, rule_set, dice_sides, enabled, settings_override, version, created_at, updated_at
         FROM conversations
         WHERE bot_id = ?1 AND scene = ?2 AND external_id = ?3
         LIMIT 1
@@ -193,6 +193,7 @@ export class D1StateStore implements StateStore {
       rule_set: string;
       dice_sides: number;
       enabled: number;
+      settings_override: string | null;
       version: number;
       created_at: string;
       updated_at: string;
@@ -227,8 +228,15 @@ export class D1StateStore implements StateStore {
         createdAt: new Date(convRow.created_at),
         updatedAt: new Date(convRow.updated_at),
       };
+      if (convRow.settings_override) {
+        try {
+          const parsedSettings = JSON.parse(convRow.settings_override) as Record<string, unknown>;
+          if (parsedSettings && typeof parsedSettings.cocRule === 'string') {
+            conversation = { ...conversation, cocRule: parsedSettings.cocRule };
+          }
+        } catch {}
+      }
     }
-
     let principalId: string;
     if (!prinRow) {
       principalId = `prin_${scope.botId}_${scope.principal.scene}_${scope.principal.scopeId}_${scope.principal.externalId}`;
@@ -502,6 +510,10 @@ export class D1StateStore implements StateStore {
         const diceSides = update.changes.diceSides ?? null;
         const enabled =
           update.changes.enabled !== undefined ? (update.changes.enabled ? 1 : 0) : null;
+        const settingsOverride =
+          update.changes.cocRule !== undefined
+            ? JSON.stringify({ cocRule: update.changes.cocRule })
+            : null;
 
         statements.push(
           this.db
@@ -510,14 +522,16 @@ export class D1StateStore implements StateStore {
             SET rule_set = COALESCE(?1, rule_set),
                 dice_sides = COALESCE(?2, dice_sides),
                 enabled = COALESCE(?3, enabled),
-                version = ?4,
+                settings_override = COALESCE(?4, settings_override),
+                version = ?5,
                 updated_at = datetime('now')
-            WHERE bot_id = ?5 AND id = ?6
+            WHERE bot_id = ?6 AND id = ?7
           `)
             .bind(
               ruleSet,
               diceSides,
               enabled,
+              settingsOverride,
               update.newVersion,
               plan.botId,
               update.conversationId,

@@ -79,6 +79,42 @@ describe('parseDiceExpression', () => {
     expect(parsedKh.expression?.keepCount).toBe(3);
   });
 
+  it('parses Chinese advantage and disadvantage keywords', () => {
+    const adv = parseDiceExpression('2d20优势');
+    expect(adv.success).toBe(true);
+    expect(adv.expression?.count).toBe(2);
+    expect(adv.expression?.faces).toBe(20);
+    expect(adv.expression?.keepDrop).toBe('kh');
+    expect(adv.expression?.keepCount).toBe(1);
+
+    const disadv = parseDiceExpression('2d20劣势');
+    expect(disadv.success).toBe(true);
+    expect(disadv.expression?.keepDrop).toBe('kl');
+    expect(disadv.expression?.keepCount).toBe(1);
+
+    const tradAdv = parseDiceExpression('2d20優勢');
+    expect(tradAdv.success).toBe(true);
+    expect(tradAdv.expression?.keepDrop).toBe('kh');
+
+    const tradDisadv = parseDiceExpression('2d20劣勢');
+    expect(tradDisadv.success).toBe(true);
+    expect(tradDisadv.expression?.keepDrop).toBe('kl');
+  });
+
+  it('parses compound arithmetic dice expressions', () => {
+    const compound = parseDiceExpression('1d20 + 2d6 + 5');
+    expect(compound.success).toBe(true);
+    expect(compound.expression?.isCompound).toBe(true);
+    expect(compound.expression?.ast.kind).toBe('binary');
+  });
+
+  it('parses nested parentheses in dice expressions', () => {
+    const nested = parseDiceExpression('(1d6 + 2) * 3');
+    expect(nested.success).toBe(true);
+    expect(nested.expression?.isCompound).toBe(true);
+    expect(nested.expression?.ast.kind).toBe('binary');
+  });
+
   it('throws ExpressionBudgetError when budget limits are exceeded', () => {
     expect(() => parseDiceExpression('101d6')).toThrow(ExpressionBudgetError);
     expect(() => parseDiceExpression('1d6 x11')).toThrow(ExpressionBudgetError);

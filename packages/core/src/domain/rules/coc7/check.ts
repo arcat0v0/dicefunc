@@ -1,6 +1,6 @@
 import type { RandomSource } from '../../../ports/random-source.js';
 import type { CharacterSheet } from '../../character/sheet.js';
-
+import { resultCheckBase } from './house-rules.js';
 export type CocSuccessLevel = 'critical' | 'extreme' | 'hard' | 'regular' | 'failure' | 'fumble';
 
 export interface CocCheckResult {
@@ -29,6 +29,7 @@ export interface CocCheckContext {
   readonly modifier?: number | undefined;
   readonly bonusDice?: number | undefined;
   readonly houseRules?: HouseRules | undefined;
+  readonly ruleId?: string | undefined;
 }
 
 export async function performCocCheck(
@@ -76,23 +77,29 @@ export async function performCocCheck(
     rolls.push(rollTotal);
   }
 
-  const isFumble = adjustedTarget < 50 ? rollTotal >= 96 : rollTotal === 100;
+  const ruleId = context.ruleId ?? '0';
+  const { successRank } = resultCheckBase(ruleId, rollTotal, adjustedTarget);
   let level: CocSuccessLevel;
-
-  if (rollTotal === 1) {
-    level = 'critical';
-  } else if (isFumble) {
-    level = 'fumble';
-  } else if (rollTotal <= Math.floor(adjustedTarget / 5)) {
-    level = 'extreme';
-  } else if (rollTotal <= Math.floor(adjustedTarget / 2)) {
-    level = 'hard';
-  } else if (rollTotal <= adjustedTarget) {
-    level = 'regular';
-  } else {
-    level = 'failure';
+  switch (successRank) {
+    case 4:
+      level = 'critical';
+      break;
+    case 3:
+      level = 'extreme';
+      break;
+    case 2:
+      level = 'hard';
+      break;
+    case 1:
+      level = 'regular';
+      break;
+    case -2:
+      level = 'fumble';
+      break;
+    default:
+      level = 'failure';
+      break;
   }
-
   const success = level !== 'failure' && level !== 'fumble';
   const result: {
     success: boolean;

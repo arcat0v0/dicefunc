@@ -5,6 +5,7 @@ import {
   createDeckSession,
   drawFromDeck,
 } from '../domain/deck/deck.js';
+import { collectDiceBudget, evaluateAst } from '../domain/dice/ast.js';
 import { applyKeepDrop, rollDice } from '../domain/dice/expression.js';
 import { parseDiceExpression } from '../domain/dice/parser.js';
 import {
@@ -14,6 +15,12 @@ import {
   generateCoc7Card,
 } from '../domain/rules/coc7/character-gen.js';
 import { performCocCheck } from '../domain/rules/coc7/check.js';
+import {
+  COC_HOUSE_RULES,
+  resolveCocHouseRule,
+  resultCheckBase,
+} from '../domain/rules/coc7/house-rules.js';
+import { rollMadnessSymptom } from '../domain/rules/coc7/madness.js';
 import {
   type Dnd5eCardAttributes,
   type Dnd5eFreeAllocationCard,
@@ -40,6 +47,12 @@ import {
   createCombatEncounter,
   resetEncounter,
 } from '../domain/rules/dnd5e/combat.js';
+import {
+  applyDeathSaveModifiers,
+  deathSaveResultText,
+  decideDeathSave,
+} from '../domain/rules/dnd5e/death-saves.js';
+import { searchRuleGlossary } from '../domain/rules/glossary.js';
 import type { Clock } from '../ports/clock.js';
 import type { RandomSource } from '../ports/random-source.js';
 import type {
@@ -205,7 +218,8 @@ async function rollHandler(input: CommandInput, context: CommandContext): Promis
   }
 
   const expr = parseResult.expression;
-  const totalRollsNeeded = expr.count * expr.repeat;
+  const { totalDice } = collectDiceBudget(expr.ast);
+  const totalRollsNeeded = totalDice * expr.repeat;
 
   if (context.budget.consumed.diceRolls + totalRollsNeeded > context.budget.maxDiceRolls) {
     const reply: PreparedReply = {
@@ -233,32 +247,39 @@ async function rollHandler(input: CommandInput, context: CommandContext): Promis
     rolls: number[];
     keptRolls: number[];
     total: number;
+    rendered?: string;
   }[] = [];
 
   for (let r = 0; r < expr.repeat; r++) {
-    const rolls = await rollDice(expr.faces, expr.count, context.random);
-    let kept = rolls;
-    if (expr.keepDrop && expr.keepCount !== undefined) {
-      kept = applyKeepDrop(rolls, expr.keepDrop, expr.keepCount);
-    }
-    const sum = kept.reduce((a, b) => a + b, 0) + (expr.modifier ?? 0);
-    repeatResults.push({ rolls, keptRolls: kept, total: sum });
+    const evalResult = await evaluateAst(expr.ast, context.random);
+    const rolls = evalResult.diceGroups.flatMap((g) => g.rolls);
+    const keptRolls = evalResult.diceGroups.flatMap((g) => g.keptRolls);
+    repeatResults.push({
+      rolls,
+      keptRolls,
+      total: evalResult.value,
+      rendered: evalResult.rendered,
+    });
   }
 
   const textLines: string[] = [];
   for (const [idx, row] of repeatResults.entries()) {
     const prefix = expr.repeat > 1 ? `#${idx + 1}: ` : '';
-    const rollsStr = `[${row.rolls.join(', ')}]`;
-    const modStr =
-      expr.modifier !== undefined
-        ? expr.modifier >= 0
-          ? `+${expr.modifier}`
-          : `${expr.modifier}`
-        : '';
     const reasonStr = expr.reason ? ` ${expr.reason}` : '';
-    textLines.push(
-      `${prefix}${expr.count}d${expr.faces}${modStr} = ${rollsStr} = ${row.total}${reasonStr}`,
-    );
+    if (expr.isCompound) {
+      textLines.push(`${prefix}${exprText} = ${row.rendered ?? ''} = ${row.total}${reasonStr}`);
+    } else {
+      const rollsStr = `[${row.rolls.join(', ')}]`;
+      const modStr =
+        expr.modifier !== undefined
+          ? expr.modifier >= 0
+            ? `+${expr.modifier}`
+            : `${expr.modifier}`
+          : '';
+      textLines.push(
+        `${prefix}${expr.count}d${expr.faces}${modStr} = ${rollsStr} = ${row.total}${reasonStr}`,
+      );
+    }
   }
 
   const firstResult = repeatResults[0];
@@ -349,7 +370,7 @@ async function helpHandler(input: CommandInput, context: CommandContext): Promis
 async function setHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
   const deadline = new Date(input.timestamp.getTime() + 300_000);
 
-  if (input.args.length < 2) {
+  if (input.args.length === 0) {
     const reply: PreparedReply = {
       executionId: input.executionId,
       part: 1,
@@ -358,7 +379,7 @@ async function setHandler(input: CommandInput, context: CommandContext): Promise
       targetId: context.snapshot.conversation.externalId,
       originMessageId: input.messageId,
       templateKey: 'set.usage',
-      text: 'Usage: .set rule <coc7|dnd5e> OR .set sides <number>',
+      text: 'Usage: .set <面数> OR .set <coc/dnd> OR .set clr OR .set rule <coc7|dnd5e>',
       deadline,
     };
     return {
@@ -369,24 +390,82 @@ async function setHandler(input: CommandInput, context: CommandContext): Promise
     };
   }
 
-  const [subKeyRaw, subValue = ''] = input.args;
-  const subKey = subKeyRaw?.toLowerCase();
-
   const conv = context.snapshot.conversation;
   const changes: {
     ruleSet?: string | undefined;
     diceSides?: number | undefined;
     enabled?: boolean | undefined;
   } = {};
-
   let confirmationText = '';
 
-  if (subKey === 'rule') {
-    changes.ruleSet = subValue;
-    confirmationText = `Rule set changed to ${subValue}`;
-  } else if (subKey === 'sides' || subKey === 'dicesides') {
-    const sides = Number.parseInt(subValue, 10);
-    if (Number.isNaN(sides) || sides <= 0) {
+  const firstArg = input.args[0]?.toLowerCase().trim() ?? '';
+
+  if (input.args.length === 1) {
+    if (firstArg === 'clr' || firstArg === 'clear') {
+      changes.diceSides = 100;
+      confirmationText = 'Default dice sides reset to 100';
+    } else if (firstArg === 'coc' || firstArg === 'coc7') {
+      changes.ruleSet = 'coc7';
+      confirmationText = 'Rule set changed to coc7';
+    } else if (firstArg === 'dnd' || firstArg === 'dnd5e') {
+      changes.ruleSet = 'dnd5e';
+      confirmationText = 'Rule set changed to dnd5e';
+    } else {
+      const sides = Number.parseInt(firstArg, 10);
+      if (!Number.isNaN(sides) && sides > 0) {
+        changes.diceSides = sides;
+        confirmationText = `Default dice sides set to ${sides}`;
+      } else {
+        const reply: PreparedReply = {
+          executionId: input.executionId,
+          part: 1,
+          msgSeq: 1,
+          scene: conv.scene,
+          targetId: conv.externalId,
+          originMessageId: input.messageId,
+          templateKey: 'set.error',
+          text: `Invalid setting argument: ${firstArg}`,
+          deadline,
+        };
+        return {
+          results: [],
+          updates: [],
+          replies: [reply],
+          logItems: [],
+        };
+      }
+    }
+  } else {
+    const [subKeyRaw, subValue = ''] = input.args;
+    const subKey = subKeyRaw?.toLowerCase();
+
+    if (subKey === 'rule') {
+      changes.ruleSet = subValue;
+      confirmationText = `Rule set changed to ${subValue}`;
+    } else if (subKey === 'sides' || subKey === 'dicesides') {
+      const sides = Number.parseInt(subValue, 10);
+      if (Number.isNaN(sides) || sides <= 0) {
+        const reply: PreparedReply = {
+          executionId: input.executionId,
+          part: 1,
+          msgSeq: 1,
+          scene: conv.scene,
+          targetId: conv.externalId,
+          originMessageId: input.messageId,
+          templateKey: 'set.error',
+          text: `Invalid dice sides: ${subValue}`,
+          deadline,
+        };
+        return {
+          results: [],
+          updates: [],
+          replies: [reply],
+          logItems: [],
+        };
+      }
+      changes.diceSides = sides;
+      confirmationText = `Default dice sides set to ${sides}`;
+    } else {
       const reply: PreparedReply = {
         executionId: input.executionId,
         part: 1,
@@ -394,8 +473,8 @@ async function setHandler(input: CommandInput, context: CommandContext): Promise
         scene: conv.scene,
         targetId: conv.externalId,
         originMessageId: input.messageId,
-        templateKey: 'set.error',
-        text: `Invalid dice sides: ${subValue}`,
+        templateKey: 'set.unknown_key',
+        text: `Unknown setting key: ${subKey}`,
         deadline,
       };
       return {
@@ -405,28 +484,7 @@ async function setHandler(input: CommandInput, context: CommandContext): Promise
         logItems: [],
       };
     }
-    changes.diceSides = sides;
-    confirmationText = `Default dice sides set to ${sides}`;
-  } else {
-    const reply: PreparedReply = {
-      executionId: input.executionId,
-      part: 1,
-      msgSeq: 1,
-      scene: conv.scene,
-      targetId: conv.externalId,
-      originMessageId: input.messageId,
-      templateKey: 'set.unknown_key',
-      text: `Unknown setting key: ${subKey}`,
-      deadline,
-    };
-    return {
-      results: [],
-      updates: [],
-      replies: [reply],
-      logItems: [],
-    };
   }
-
   const update: StateUpdate = {
     type: 'conversation-settings',
     conversationId: conv.id,
@@ -593,7 +651,11 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
 
     const requestedAttrs = args[0] === 'show' || args[0] === 'list' ? args.slice(1) : args;
     let text = '';
-    if (requestedAttrs.length > 0) {
+    if (requestedAttrs.length === 1 && /^\d+$/.test(requestedAttrs[0] ?? '')) {
+      const threshold = Number.parseInt(requestedAttrs[0] ?? '0', 10);
+      const filtered = Object.entries(sheet.attributes).filter(([_, v]) => v >= threshold);
+      text = `「${sheet.name}」的属性 (≥${threshold})：\n${filtered.length > 0 ? filtered.map(([k, v]) => `${k}: ${v}`).join(', ') : '(无符合条件属性)'}`;
+    } else if (requestedAttrs.length > 0) {
       const items = requestedAttrs.map((k) => `${k}: ${sheet.attributes[k] ?? '未设置'}`);
       text = `「${sheet.name}」的属性：${items.join(', ')}`;
     } else {
@@ -602,7 +664,6 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
         entries.length > 0 ? entries.map(([k, v]) => `${k}: ${v}`).join(', ') : '(无属性)';
       text = `「${sheet.name}」的属性：\n${attrsStr}`;
     }
-
     return {
       results: [
         {
@@ -751,7 +812,8 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
   }
 
   const rawText = args.join(' ');
-  const regex = /([\u4e00-\u9fa5a-zA-Z0-9_]+)\s*([:+=-]?)\s*(-?\d+)/g;
+  const regex =
+    /([\u4e00-\u9fa5a-zA-Z0-9_]+)\s*([:+=-]?)\s*([+-]?\d*d\d*(?:[a-zA-Z\u4e00-\u9fa5]+\d*)?|-?\d+)/gi;
   const changes: Record<string, number> = {};
   const changeDescriptions: string[] = [];
   const currentAttrs = sheet ? { ...sheet.attributes } : {};
@@ -760,22 +822,45 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
   while (match !== null) {
     const key = match[1];
     const op = match[2];
-    const val = Number.parseInt(match[3] ?? '0', 10);
-    if (key && !Number.isNaN(val)) {
+    const valStr = match[3] ?? '0';
+    if (key) {
       const prev = currentAttrs[key] ?? 0;
-      let nextVal = val;
-      if (op === '+') {
-        nextVal = prev + val;
-      } else if (op === '-') {
-        nextVal = prev - val;
+      let val = 0;
+      if (/[dD]/.test(valStr)) {
+        const parsed = parseDiceExpression(valStr);
+        if (parsed.success && parsed.expression) {
+          const evalRes = await evaluateAst(parsed.expression.ast, context.random);
+          val = evalRes.value;
+        }
+      } else {
+        val = Number.parseInt(valStr, 10);
       }
-      currentAttrs[key] = nextVal;
-      changes[key] = nextVal;
-      changeDescriptions.push(`${key}: ${nextVal}`);
+      if (!Number.isNaN(val)) {
+        let nextVal = val;
+        if (op === '+') {
+          nextVal = prev + val;
+          changeDescriptions.push(
+            /[dD]/.test(valStr)
+              ? `${key}: ${prev} ➯ ${nextVal} (+${valStr}=${val})`
+              : `${key}: ${nextVal}`,
+          );
+        } else if (op === '-') {
+          nextVal = prev - val;
+          changeDescriptions.push(
+            /[dD]/.test(valStr)
+              ? `${key}: ${prev} ➯ ${nextVal} (-${valStr}=${val})`
+              : `${key}: ${nextVal}`,
+          );
+        } else {
+          nextVal = val;
+          changeDescriptions.push(`${key}: ${nextVal}`);
+        }
+        currentAttrs[key] = nextVal;
+        changes[key] = nextVal;
+      }
     }
     match = regex.exec(rawText);
   }
-
   if (changeDescriptions.length === 0) {
     return {
       results: [],
@@ -957,6 +1042,135 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
           originMessageId: input.messageId,
           templateKey: 'character.unbind',
           text: '已解除当前会话的角色卡绑定。',
+          deadline,
+        },
+      ],
+      logItems: [],
+    };
+  }
+  if (sub === 'save') {
+    if (!sheet) {
+      return {
+        results: [],
+        updates: [],
+        replies: [
+          {
+            executionId: input.executionId,
+            part: 1,
+            msgSeq: 1,
+            scene: conv.scene,
+            targetId: conv.externalId,
+            originMessageId: input.messageId,
+            templateKey: 'character.sheet.unbound',
+            text: '未绑定角色卡，无法保存快照。',
+            deadline,
+          },
+        ],
+        logItems: [],
+      };
+    }
+
+    const saveName = args.slice(1).join(' ').trim() || sheet.name;
+    const senderId = input.sender?.externalId ?? 'unknown';
+    const snapshotSheetId = `sheet_${context.botId}_${senderId}_${saveName}`;
+    const update: StateUpdate = {
+      type: 'character-sheet',
+      sheetId: snapshotSheetId,
+      expectedVersion: 0,
+      changes: {
+        name: saveName,
+        attributes: { ...sheet.attributes },
+        ownerPrincipal: senderId,
+        ruleSet: sheet.ruleSet,
+      },
+      newVersion: 1,
+    };
+
+    return {
+      results: [
+        {
+          executionId: input.executionId,
+          kind: 'character.save',
+          ruleVersion: '1.0.0',
+          data: { sheetId: snapshotSheetId, name: saveName },
+        },
+      ],
+      updates: [update],
+      replies: [
+        {
+          executionId: input.executionId,
+          part: 1,
+          msgSeq: 1,
+          scene: conv.scene,
+          targetId: conv.externalId,
+          originMessageId: input.messageId,
+          templateKey: 'character.save',
+          text: `已保存角色卡「${saveName}」(ID: ${snapshotSheetId}) 快照。`,
+          deadline,
+        },
+      ],
+      logItems: [],
+    };
+  }
+
+  if (sub === 'load') {
+    const target = args.slice(1).join(' ').trim();
+    if (!target) {
+      return {
+        results: [],
+        updates: [],
+        replies: [
+          {
+            executionId: input.executionId,
+            part: 1,
+            msgSeq: 1,
+            scene: conv.scene,
+            targetId: conv.externalId,
+            originMessageId: input.messageId,
+            templateKey: 'character.load.help',
+            text: '请指定要载入的角色卡名称或ID：.pc load <卡名/ID>',
+            deadline,
+          },
+        ],
+        logItems: [],
+      };
+    }
+
+    const senderId = input.sender?.externalId ?? 'unknown';
+    const currentVer = context.snapshot.characterBinding?.version ?? 0;
+    const sheetId = target.startsWith('sheet_')
+      ? target
+      : `sheet_${context.botId}_${senderId}_${target}`;
+
+    const update: StateUpdate = {
+      type: 'character-binding',
+      conversationId: conv.id,
+      principalId: context.snapshot.principalId ?? senderId,
+      expectedVersion: currentVer,
+      changes: { sheetId },
+      newVersion: currentVer + 1,
+    };
+
+    return {
+      results: [
+        {
+          executionId: input.executionId,
+          kind: 'character.load',
+          ruleVersion: '1.0.0',
+          data: { sheetId, name: target },
+        },
+      ],
+      updates: [update],
+      replies: [
+        {
+          executionId: input.executionId,
+          part: 1,
+          msgSeq: 1,
+          scene: conv.scene,
+          targetId: conv.externalId,
+          originMessageId: input.messageId,
+          templateKey: 'character.load',
+          text: `已将当前会话绑定至角色卡「${target}」(ID: ${sheetId})。`,
           deadline,
         },
       ],
@@ -1600,12 +1814,15 @@ async function checkHandler(
     targetValue = 50;
   }
 
+  const isRc = input.commandName.toLowerCase() === 'rc';
+  const ruleId = isRc ? '0' : (conv.cocRule ?? '0');
   const checkResult = await performCocCheck(
     {
       character: sheet,
       skillName,
       targetValue,
       bonusDice,
+      ruleId,
     },
     context.random,
   );
@@ -2829,6 +3046,657 @@ async function dndHandler(input: CommandInput, context: CommandContext): Promise
   };
 }
 
+async function scHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+  const conv = context.snapshot.conversation;
+  const sheet = context.snapshot.sheet;
+  const senderId = input.sender?.externalId ?? 'unknown';
+  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const args = input.args;
+
+  if (args.length === 0 || args[0]?.toLowerCase() === 'help') {
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'coc.sc.help',
+      text: '理智检定指令：\n.sc <成功掉san>/<失败掉san> [san值]\n.sc <失败掉san> [san值]\n例：.sc 1/1d6 或 .sc 1d3',
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  const exprArg = args[0] ?? '';
+  let customSan: number | undefined;
+  if (args.length > 1) {
+    const maybeSan = Number.parseInt(args[1] ?? '', 10);
+    if (!Number.isNaN(maybeSan) && maybeSan >= 0) {
+      customSan = maybeSan;
+    }
+  }
+
+  const currentSan =
+    customSan ?? sheet?.attributes.理智 ?? sheet?.attributes.SAN ?? sheet?.attributes.san ?? 50;
+
+  let successLossExpr = '0';
+  let failLossExpr = '1d6';
+
+  if (exprArg.includes('/')) {
+    const parts = exprArg.split('/');
+    successLossExpr = parts[0]?.trim() || '0';
+    failLossExpr = parts[1]?.trim() || '1d6';
+  } else {
+    failLossExpr = exprArg.trim();
+  }
+
+  const rollTotal = await context.random.integer(1, 100);
+  const ruleId = conv.cocRule ?? '0';
+  const { successRank } = resultCheckBase(ruleId, rollTotal, currentSan);
+  const isSuccess = successRank > 0;
+
+  const chosenExpr = isSuccess ? successLossExpr : failLossExpr;
+  let sanLoss = 0;
+
+  const parsedLoss = parseDiceExpression(chosenExpr, 6);
+  if (parsedLoss.success && parsedLoss.expression) {
+    const evalRes = await evaluateAst(parsedLoss.expression.ast, context.random);
+    sanLoss = Math.max(0, evalRes.value);
+  } else {
+    const num = Number.parseInt(chosenExpr, 10);
+    sanLoss = Number.isNaN(num) ? 0 : Math.max(0, num);
+  }
+
+  const sanNew = Math.max(0, currentSan - sanLoss);
+
+  let madnessTip = '';
+  if (sanNew === 0) {
+    madnessTip = '\n提示：理智归零，已永久疯狂(可用.ti或.li抽取症状)';
+  } else if (sanLoss >= 5) {
+    madnessTip =
+      '\n提示：单次损失理智超过5点，若智力检定(.ra 智力)通过，将进入临时性疯狂(可用.ti或.li抽取症状)';
+  }
+
+  const updates: StateUpdate[] = [];
+  if (sheet) {
+    const nextAttrs = { ...sheet.attributes };
+    nextAttrs.理智 = sanNew;
+    if (nextAttrs.SAN !== undefined) nextAttrs.SAN = sanNew;
+    if (nextAttrs.san !== undefined) nextAttrs.san = sanNew;
+    updates.push({
+      type: 'character-sheet',
+      sheetId: sheet.id,
+      expectedVersion: sheet.version,
+      changes: { attributes: nextAttrs },
+      newVersion: sheet.version + 1,
+    });
+  }
+
+  const outcomeCn = isSuccess ? '成功' : '失败';
+  const text = `${actorName} 的理智检定:\n1D100=${rollTotal}/${currentSan} ${outcomeCn}\n理智变化: ${currentSan} ➯ ${sanNew} (扣除${chosenExpr}=${sanLoss}点)${madnessTip}`;
+
+  const result: CommandResult = {
+    executionId: input.executionId,
+    kind: 'coc.sc',
+    ruleVersion: '1.0.0',
+    data: {
+      actor: actorName,
+      roll: rollTotal,
+      sanOld: currentSan,
+      sanNew,
+      sanLoss,
+      success: isSuccess,
+    },
+  };
+
+  const reply: PreparedReply = {
+    executionId: input.executionId,
+    part: 1,
+    msgSeq: 1,
+    scene: conv.scene,
+    targetId: conv.externalId,
+    originMessageId: input.messageId,
+    templateKey: 'coc.sc',
+    text,
+    deadline,
+  };
+
+  return { results: [result], updates, replies: [reply], logItems: [] };
+}
+
+async function tiHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+  const conv = context.snapshot.conversation;
+  const sheet = context.snapshot.sheet;
+  const senderId = input.sender?.externalId ?? 'unknown';
+  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+
+  const res = await rollMadnessSymptom('temporal', context.random);
+  const text = `「${actorName}」的疯狂发作-即时症状:\n${res.expressionText}\n${res.description}`;
+
+  const reply: PreparedReply = {
+    executionId: input.executionId,
+    part: 1,
+    msgSeq: 1,
+    scene: conv.scene,
+    targetId: conv.externalId,
+    originMessageId: input.messageId,
+    templateKey: 'coc.ti',
+    text,
+    deadline,
+  };
+
+  return {
+    results: [
+      {
+        executionId: input.executionId,
+        kind: 'coc.ti',
+        ruleVersion: '1.0.0',
+        data: { actor: actorName, ...res },
+      },
+    ],
+    updates: [],
+    replies: [reply],
+    logItems: [],
+  };
+}
+
+async function liHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+  const conv = context.snapshot.conversation;
+  const sheet = context.snapshot.sheet;
+  const senderId = input.sender?.externalId ?? 'unknown';
+  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+
+  const res = await rollMadnessSymptom('summary', context.random);
+  const text = `「${actorName}」的疯狂发作-总结症状:\n${res.expressionText}\n${res.description}`;
+
+  const reply: PreparedReply = {
+    executionId: input.executionId,
+    part: 1,
+    msgSeq: 1,
+    scene: conv.scene,
+    targetId: conv.externalId,
+    originMessageId: input.messageId,
+    templateKey: 'coc.li',
+    text,
+    deadline,
+  };
+
+  return {
+    results: [
+      {
+        executionId: input.executionId,
+        kind: 'coc.li',
+        ruleVersion: '1.0.0',
+        data: { actor: actorName, ...res },
+      },
+    ],
+    updates: [],
+    replies: [reply],
+    logItems: [],
+  };
+}
+
+async function enHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+  const conv = context.snapshot.conversation;
+  const sheet = context.snapshot.sheet;
+  const senderId = input.sender?.externalId ?? 'unknown';
+  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const args = input.args;
+
+  if (args.length === 0 || args[0]?.toLowerCase() === 'help') {
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'coc.en.help',
+      text: '技能成长指令：\n.en <技能名> [技能点数] [+<成长值>]\n例：.en 侦查 或 .en 侦查 70 或 .en 侦查 +1d10',
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  let skillName = args[0] ?? '';
+  let customValue: number | undefined;
+  let plusExpr = '1d10';
+
+  for (let i = 1; i < args.length; i++) {
+    const arg = args[i] ?? '';
+    if (arg.startsWith('+')) {
+      plusExpr = arg.slice(1).trim() || '1d10';
+    } else {
+      const num = Number.parseInt(arg, 10);
+      if (!Number.isNaN(num)) {
+        customValue = num;
+      }
+    }
+  }
+
+  const matchPlus = skillName.match(/^(.*?)\+(\d*d\d+|\d+)$/);
+  if (matchPlus?.[1] && matchPlus[2]) {
+    skillName = matchPlus[1].trim();
+    plusExpr = matchPlus[2].trim();
+  }
+
+  const currentValue = customValue ?? sheet?.attributes[skillName] ?? 50;
+  const rollTotal = await context.random.integer(1, 100);
+
+  const growthSuccess = rollTotal > 95 || rollTotal > currentValue;
+  let increment = 0;
+
+  if (growthSuccess) {
+    const parsed = parseDiceExpression(plusExpr, 10);
+    if (parsed.success && parsed.expression) {
+      const evalRes = await evaluateAst(parsed.expression.ast, context.random);
+      increment = Math.max(0, evalRes.value);
+    } else {
+      const n = Number.parseInt(plusExpr, 10);
+      increment = Number.isNaN(n) ? await context.random.integer(1, 10) : Math.max(0, n);
+    }
+  }
+
+  const newValue = currentValue + increment;
+
+  const updates: StateUpdate[] = [];
+  if (sheet && growthSuccess && increment > 0) {
+    const nextAttrs = { ...sheet.attributes, [skillName]: newValue };
+    updates.push({
+      type: 'character-sheet',
+      sheetId: sheet.id,
+      expectedVersion: sheet.version,
+      changes: { attributes: nextAttrs },
+      newVersion: sheet.version + 1,
+    });
+  }
+
+  let resultDetail = '';
+  if (growthSuccess) {
+    resultDetail = `“${skillName}” 增加了 ${plusExpr}=${increment} 点，当前为 ${newValue} 点`;
+  } else {
+    resultDetail = `“${skillName}” 成长失败了！`;
+  }
+
+  const text = `「${actorName}」的“${skillName}”成长检定：\nD100=${rollTotal}/${currentValue} ${growthSuccess ? '成功' : '失败'}\n${resultDetail}`;
+
+  const reply: PreparedReply = {
+    executionId: input.executionId,
+    part: 1,
+    msgSeq: 1,
+    scene: conv.scene,
+    targetId: conv.externalId,
+    originMessageId: input.messageId,
+    templateKey: 'coc.en',
+    text,
+    deadline,
+  };
+
+  return {
+    results: [
+      {
+        executionId: input.executionId,
+        kind: 'coc.en',
+        ruleVersion: '1.0.0',
+        data: {
+          actor: actorName,
+          skill: skillName,
+          roll: rollTotal,
+          oldValue: currentValue,
+          newValue,
+          increment,
+          success: growthSuccess,
+        },
+      },
+    ],
+    updates,
+    replies: [reply],
+    logItems: [],
+  };
+}
+
+async function dsHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+  const conv = context.snapshot.conversation;
+  const sheet = context.snapshot.sheet;
+  const senderId = input.sender?.externalId ?? 'unknown';
+  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const args = input.args;
+  const sub = args[0]?.trim();
+
+  if (!sheet || (sheet.attributes.HP === undefined && sheet.attributes.hp === undefined)) {
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'dnd5e.ds.nohp',
+      text: `${actorName} 未设置生命值，无法进行死亡豁免检定。`,
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  const currentHp = sheet.attributes.HP ?? sheet.attributes.hp ?? 0;
+  if (currentHp > 0) {
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'dnd5e.ds.alive',
+      text: `${actorName} 生命值大于0(当前为${currentHp})，无法进行死亡豁免检定。`,
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  let dss = sheet.attributes.DSS ?? sheet.attributes.dss ?? 0;
+  let dsf = sheet.attributes.DSF ?? sheet.attributes.dsf ?? 0;
+
+  if (sub === 'stat') {
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'dnd5e.ds.stat',
+      text: `${actorName} 当前的死亡豁免情况: 成功${dss} 失败${dsf}`,
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  const manualMatch = sub?.match(/^(s|S|成功|f|F|失败)([+-＋－])(\d+)$/);
+  if (manualMatch?.[1] && manualMatch[2] && manualMatch[3]) {
+    const kind = manualMatch[1];
+    const isNeg = manualMatch[2] === '-' || manualMatch[2] === '－';
+    const val = Number.parseInt(manualMatch[3], 10) * (isNeg ? -1 : 1);
+    if (kind === 's' || kind === 'S' || kind === '成功') {
+      dss = Math.max(0, dss + val);
+    } else {
+      dsf = Math.max(0, dsf + val);
+    }
+    const { stable, dead } = deathSaveResultText({ successes: dss, failures: dsf });
+    let exText = '';
+    if (stable) {
+      exText = '\n累计获得了3次死亡豁免检定成功，伤势稳定了！';
+      dss = 0;
+      dsf = 0;
+    } else if (dead) {
+      exText = '\n累计获得了3次死亡豁免检定失败，不幸去世了！';
+      dss = 0;
+      dsf = 0;
+    }
+    const nextAttrs = { ...sheet.attributes, DSS: dss, DSF: dsf };
+    const update: StateUpdate = {
+      type: 'character-sheet',
+      sheetId: sheet.id,
+      expectedVersion: sheet.version,
+      changes: { attributes: nextAttrs },
+      newVersion: sheet.version + 1,
+    };
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'dnd5e.ds.manual',
+      text: `${actorName} 当前的死亡豁免情况: 成功${dss} 失败${dsf}${exText}`,
+      deadline,
+    };
+    return { results: [], updates: [update], replies: [reply], logItems: [] };
+  }
+
+  let d20 = await context.random.integer(1, 20);
+  if (sub === '优势' || sub === 'kh' || sub === 'kh1') {
+    const d20b = await context.random.integer(1, 20);
+    d20 = Math.max(d20, d20b);
+  } else if (sub === '劣势' || sub === 'kl' || sub === 'kl1') {
+    const d20b = await context.random.integer(1, 20);
+    d20 = Math.min(d20, d20b);
+  }
+
+  const { outcome, successPlus, failurePlus } = decideDeathSave(d20);
+  const nextAttrs = { ...sheet.attributes };
+  let outcomeText = '';
+  let exText = '';
+
+  if (outcome === 'revive') {
+    outcomeText = '你觉得你还可以抢救一下！HP回复1点！伤势稳定了！';
+    nextAttrs.HP = 1;
+    nextAttrs.hp = 1;
+    dss = 0;
+    dsf = 0;
+  } else {
+    dss = Math.max(0, dss + successPlus);
+    dsf = Math.max(0, dsf + failurePlus);
+    if (outcome === 'criticalFailure') {
+      outcomeText = '伤势莫名加重了！死亡豁免失败+2！';
+    } else if (outcome === 'success') {
+      outcomeText = '伤势暂时得到控制！死亡豁免成功+1';
+    } else {
+      outcomeText = '有些不妙！死亡豁免失败+1';
+    }
+    const { stable, dead } = deathSaveResultText({ successes: dss, failures: dsf });
+    if (stable) {
+      exText = '\n累计获得了3次死亡豁免检定成功，伤势稳定了！';
+      dss = 0;
+      dsf = 0;
+    } else if (dead) {
+      exText = '\n累计获得了3次死亡豁免检定失败，不幸去世了！';
+      dss = 0;
+      dsf = 0;
+    }
+  }
+
+  nextAttrs.DSS = dss;
+  nextAttrs.DSF = dsf;
+
+  const update: StateUpdate = {
+    type: 'character-sheet',
+    sheetId: sheet.id,
+    expectedVersion: sheet.version,
+    changes: { attributes: nextAttrs },
+    newVersion: sheet.version + 1,
+  };
+
+  const statusText = outcome === 'revive' ? '' : `\n当前情况: 成功${dss} 失败${dsf}`;
+  const text = `${actorName} 的死亡豁免检定: 1D20=${d20} ${outcomeText}${exText}${statusText}`;
+
+  const reply: PreparedReply = {
+    executionId: input.executionId,
+    part: 1,
+    msgSeq: 1,
+    scene: conv.scene,
+    targetId: conv.externalId,
+    originMessageId: input.messageId,
+    templateKey: 'dnd5e.ds.roll',
+    text,
+    deadline,
+  };
+
+  return {
+    results: [
+      {
+        executionId: input.executionId,
+        kind: 'dnd5e.ds',
+        ruleVersion: '1.0.0',
+        data: { actor: actorName, d20, dss, dsf },
+      },
+    ],
+    updates: [update],
+    replies: [reply],
+    logItems: [],
+  };
+}
+
+async function setcocHandler(
+  input: CommandInput,
+  context: CommandContext,
+): Promise<CommandDecision> {
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+  const conv = context.snapshot.conversation;
+  const arg = input.args[0]?.toLowerCase().trim();
+
+  if (!arg) {
+    const currentRule = conv.cocRule ?? '0';
+    const def = resolveCocHouseRule(currentRule) ?? COC_HOUSE_RULES[0];
+    const text = `当前房规: ${def ? def.name : currentRule}\n${def ? def.desc : ''}`;
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'coc.setcoc.current',
+      text,
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  if (arg === 'details') {
+    const lines = COC_HOUSE_RULES.map(
+      (r) => `.setcoc ${r.key} // ${r.name}：${r.desc.replaceAll('\n', ' ')}`,
+    );
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'coc.setcoc.details',
+      text: `COC房规列表：\n${lines.join('\n')}`,
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  const targetRule = resolveCocHouseRule(arg);
+  if (!targetRule) {
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'coc.setcoc.invalid',
+      text: `无效的房规：${arg}。可选规则：0~5，dg。使用 .setcoc details 查看详细说明。`,
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  const update: StateUpdate = {
+    type: 'conversation-settings',
+    conversationId: conv.id,
+    expectedVersion: conv.version,
+    changes: { cocRule: targetRule.key },
+    newVersion: conv.version + 1,
+  };
+
+  const text = `已切换房规为 ${targetRule.name} (${targetRule.key}):\n${targetRule.desc}\nCOC7规则扩展已自动开启`;
+
+  const reply: PreparedReply = {
+    executionId: input.executionId,
+    part: 1,
+    msgSeq: 1,
+    scene: conv.scene,
+    targetId: conv.externalId,
+    originMessageId: input.messageId,
+    templateKey: 'coc.setcoc.set',
+    text,
+    deadline,
+  };
+
+  return {
+    results: [
+      {
+        executionId: input.executionId,
+        kind: 'coc.setcoc',
+        ruleVersion: '1.0.0',
+        data: { rule: targetRule.key, name: targetRule.name },
+      },
+    ],
+    updates: [update],
+    replies: [reply],
+    logItems: [],
+  };
+}
+
+async function findHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+  const conv = context.snapshot.conversation;
+  const query = input.args.join(' ').trim();
+
+  if (!query) {
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'find.help',
+      text: '规则查询指令：.find <关键词>\n例：.find 理智 或 .find 死亡豁免',
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  const { matches } = searchRuleGlossary(query, 3);
+  let text = '';
+  if (matches.length === 0) {
+    text = `未找到与「${query}」相关的规则条目。`;
+  } else {
+    const entries = matches.map((m) => `📖 【${m.title}】\n${m.content}`);
+    text = `查询「${query}」的结果：\n\n${entries.join('\n\n')}`;
+  }
+
+  const reply: PreparedReply = {
+    executionId: input.executionId,
+    part: 1,
+    msgSeq: 1,
+    scene: conv.scene,
+    targetId: conv.externalId,
+    originMessageId: input.messageId,
+    templateKey: 'find.result',
+    text,
+    deadline,
+  };
+
+  return {
+    results: [
+      {
+        executionId: input.executionId,
+        kind: 'rule.find',
+        ruleVersion: '1.0.0',
+        data: { query, count: matches.length },
+      },
+    ],
+    updates: [],
+    replies: [reply],
+    logItems: [],
+  };
+}
+
 export function createDefaultCommandRegistry(): CommandRegistry {
   const registry = new DefaultCommandRegistry();
 
@@ -3039,6 +3907,83 @@ export function createDefaultCommandRegistry(): CommandRegistry {
       description: 'Set or inspect player nickname',
     },
     nnHandler,
+  );
+
+  registry.register(
+    {
+      name: 'sc',
+      aliases: ['sancheck'],
+      permission: 'all',
+      allowedWhenDisabled: false,
+      description: 'COC sanity check',
+    },
+    scHandler,
+  );
+
+  registry.register(
+    {
+      name: 'ti',
+      aliases: [],
+      permission: 'all',
+      allowedWhenDisabled: false,
+      description: 'COC temporary madness symptom table',
+    },
+    tiHandler,
+  );
+
+  registry.register(
+    {
+      name: 'li',
+      aliases: [],
+      permission: 'all',
+      allowedWhenDisabled: false,
+      description: 'COC summary madness symptom table',
+    },
+    liHandler,
+  );
+
+  registry.register(
+    {
+      name: 'en',
+      aliases: [],
+      permission: 'all',
+      allowedWhenDisabled: false,
+      description: 'COC skill growth check',
+    },
+    enHandler,
+  );
+
+  registry.register(
+    {
+      name: 'ds',
+      aliases: ['死亡豁免'],
+      permission: 'all',
+      allowedWhenDisabled: false,
+      description: 'DND5e death saving throws',
+    },
+    dsHandler,
+  );
+
+  registry.register(
+    {
+      name: 'setcoc',
+      aliases: [],
+      permission: 'groupHost',
+      allowedWhenDisabled: true,
+      description: 'Set COC house rules',
+    },
+    setcocHandler,
+  );
+
+  registry.register(
+    {
+      name: 'find',
+      aliases: [],
+      permission: 'all',
+      allowedWhenDisabled: true,
+      description: 'Search TRPG rule glossary',
+    },
+    findHandler,
   );
   return registry;
 }
