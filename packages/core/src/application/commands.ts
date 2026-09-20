@@ -573,16 +573,245 @@ async function hiddenRollHandler(
 
 async function helpHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
   const deadline = new Date(input.timestamp.getTime() + 300_000);
-  const text =
-    'DiceFunc Commands:\n' +
-    '.r [expr] [reason] - Roll dice (e.g. .r 1d100, .r 3d6+2)\n' +
-    '.rh [expr] [reason] - Hidden roll using trusted C2C binding\n' +
-    '.rhbind - Create, inspect, or remove a hidden-roll C2C binding\n' +
-    '.set rule <coc7|dnd5e> - Set conversation rule set\n' +
-    '.set sides <number> - Set default dice sides\n' +
-    '.userid - View your user ID\n' +
-    '.help - Show this message';
+  const arg = input.args[0]?.trim();
+  const fullArg = input.args.join(' ').trim();
 
+  let text = '';
+
+  if (!arg) {
+    text =
+      'DiceFunc 0.1.0\n' +
+      '开源地址: https://github.com/arcat0v0/dicefunc\n' +
+      '========\n' +
+      '.help 骰点/骰主/协议/娱乐/跑团/扩展/查询/其他\n' +
+      '========\n' +
+      '跑团机器人已就绪。';
+  } else {
+    const lower = arg.toLowerCase();
+    if (lower === 'help' || arg === '帮助') {
+      text =
+        '帮助指令，用于查看指令帮助和helpdoc中录入的信息:\n' +
+        '.help // 查看本帮助\n' +
+        '.help 指令 // 查看某指令信息\n' +
+        '.help 扩展模块 // 查看扩展信息，如.help coc7\n' +
+        '.help 关键字 // 查看任意帮助，同.find\n' +
+        '.help reload // 重新加载帮助文档，需要Master权限';
+    } else if (lower === 'reload') {
+      text = context.snapshot.permissions.isDiceMaster
+        ? '帮助文档已经重新装载'
+        : '你不具备Master权限';
+    } else if (arg === '骰点') {
+      text =
+        '.help 骰点：\n' +
+        ' .r  //丢一个100面骰\n' +
+        '.r d10 //丢一个10面骰(数字可改)\n' +
+        '.r 3d6 //丢3个6面骰(数字可改)\n' +
+        '.ra 侦查 //侦查技能检定\n' +
+        '.ra 侦查+10 //技能临时加值检定\n' +
+        '.ra 3#p 射击 // 连续射击三次';
+    } else if (arg === '跑团') {
+      text =
+        '.help 跑团：\n' +
+        '.st 力量50 //载入技能/属性\n' +
+        '.coc // coc7版人物做成\n' +
+        '.dnd // dnd5版任务做成\n' +
+        '.pc new <角色名> // 创建角色并自动绑卡，无角色名则为当前\n' +
+        '.pc tag <角色名> // 当前群绑卡/解除绑卡(不填角色名)\n' +
+        '.pc save <角色名> // 保存角色[不绑卡时需要手动保存]，无角色名则为当前\n' +
+        '.pc load <角色名> // 加载角色[不绑卡]，无角色名则为当前\n' +
+        '.pc list //列出当前角色\n' +
+        '.pc del <角色名> //删除角色\n' +
+        '.setcoc 2 //设置为coc2版房规\n' +
+        '.nn 张三 //将自己的角色名设置为张三';
+    } else if (arg === '扩展') {
+      text =
+        '.help 扩展：\n' +
+        '扩展功能可以让你开关部分指令。\n' +
+        '例如你希望你的骰子是纯TRPG骰，那么可以通过.ext xxx off关闭一系列娱乐模块。\n' +
+        '或者目前正在进行dnd5e游戏，你可以通过如下指令开关dnd特化扩展。COC亦然。\n' +
+        '注意一点，不同扩展允许存在同名指令，例如dnd和coc都有st和rc，但他们本质上不是同一个指令，并不通用，还请注意。\n\n' +
+        '.ext coc7 on // 打开coc7版扩展\n' +
+        '.ext dnd5e off // 关闭dnd5版扩展\n\n' +
+        '.ext dnd5e on // 打开dnd5版扩展\n' +
+        '.ext coc7 off // 关闭coc7版扩展';
+    } else if (arg === '骰主' || arg === '骰主信息') {
+      text = '骰主很神秘，什么都没有说——';
+    } else if (arg === '协议' || arg === '使用协议') {
+      text =
+        '请在遵守以下规则前提下使用:\n' +
+        '1. 遵守国家法律法规\n' +
+        '2. 在跑团相关群进行使用\n' +
+        '3. 不要随意踢出、禁言、刷屏\n' +
+        '4. 务必信任骰主，有事留言\n' +
+        '如不同意使用.bot bye使其退群，谢谢。\n' +
+        '祝玩得愉快。';
+    } else if (arg === '娱乐') {
+      text = '帮助:娱乐\n.gugu // 随机召唤一只鸽子\n.jrrp 今日人品';
+    } else if (arg === '其他' || arg === '其它') {
+      text =
+        '帮助:其他\n' +
+        '.find 克苏鲁星之眷族 //查找对应怪物资料\n' +
+        '.find 70尺 法术 // 查找关联资料（仅在全文搜索开启时可用）';
+    } else if (arg === '查询') {
+      text = '查询指令：\n' + '.find <关键字> // 查找规则百科\n' + '例：.find 力量 或 .find 狂暴';
+    } else if (arg === '指令') {
+      text =
+        '核心指令列表:\n' +
+        '.r / .rh // 掷骰与暗骰\n' +
+        '.ra / .rc // 技能与属性检定\n' +
+        '.st // 属性与角色卡管理\n' +
+        '.pc // 角色卡切换与绑定\n' +
+        '.nn // 昵称设置\n' +
+        '.coc / .dnd // 制卡指令\n' +
+        '.sc / .en // 理智检定与技能成长\n' +
+        '.hp / .init / .ss / .ds // DND战斗与状态管理\n' +
+        '.set / .bot // 群规则与服务开关\n' +
+        '.log // 跑团日志\n' +
+        '.draw / .deck // 牌堆抽牌\n' +
+        '.jrrp / .gugu / .name // 娱乐指令\n' +
+        '.find / .modu // 规则与模组查询\n' +
+        '输入 .help <指令名> 查看对应指令详情';
+    } else if (lower === 'r' || lower === 'roll' || lower === 'rd') {
+      text = '.r <表达式> [<原因>] // 骰点指令\n.rh <表达式> <原因> // 暗骰';
+    } else if (lower === 'rh' || lower === 'rhd' || lower === 'rdh') {
+      text = '.rh <表达式> <原因> // 暗骰';
+    } else if (lower === 'rhbind') {
+      text =
+        '暗骰私聊绑定：\n' +
+        '.rhbind // 查看当前绑定状态\n' +
+        '.rhbind on // 启用当前群私聊暗骰绑定\n' +
+        '.rhbind off // 关闭当前群私聊暗骰绑定';
+    } else if (lower === 'ra' || lower === 'rc' || lower === 'check') {
+      text =
+        '检定指令:\n' +
+        '.ra/rc <属性表达式> // 属性检定指令，当前者小于等于后者，检定通过\n' +
+        '.ra <难度><属性> // 如 .ra 困难侦查\n' +
+        '.ra b <属性表达式> // 奖励骰或惩罚骰\n' +
+        '.ra p <属性表达式>';
+    } else if (lower === 'st' || lower === 'cst' || lower === 'dst') {
+      text =
+        '属性与角色卡设置:\n' +
+        '.st 力量50 // 载入技能/属性\n' +
+        '.st show // 展示个人属性\n' +
+        '.st clr // 清除属性\n' +
+        '.st help // 查看详细帮助';
+    } else if (lower === 'nn' || lower === 'nick') {
+      text =
+        '角色名设置:\n' +
+        '.nn // 查看当前角色名\n' +
+        '.nn <角色名> // 改为指定角色名，若有卡片不会连带修改\n' +
+        '.nn clr // 重置回群名片';
+    } else if (lower === 'pc' || lower === 'char' || lower === 'ch') {
+      text =
+        '角色卡管理命令：\n' +
+        '.pc new <角色名> - 创建并绑定新卡\n' +
+        '.pc list - 查看当前绑定卡\n' +
+        '.pc untag - 解除当前绑定';
+    } else if (lower === 'coc' || lower === 'coc7' || lower === 'coc6') {
+      text = 'COC制卡指令:\n.coc [<数量>] // 制卡指令，返回<数量>组人物属性';
+    } else if (lower === 'dnd' || lower === 'dnd5e' || lower === 'dndx' || lower === 'dnd5ex') {
+      text =
+        'DND5E制卡指令:\n' +
+        '.dnd [<数量>] // 制卡指令，返回<数量>组人物属性，最高为10次\n' +
+        '.dndx [<数量>] // 制卡指令，但带有属性名，最高为10次';
+    } else if (lower === 'bot') {
+      text = '.bot on // 开启服务\n.bot off // 关闭服务';
+    } else if (lower === 'set' || lower === 's') {
+      text =
+        '群设置指令:\n' +
+        '.set rule <coc7|dnd5e> // 切换当前规则\n' +
+        '.set sides <面数> // 设置群默认骰子面数';
+    } else if (lower === 'setcoc') {
+      text =
+        '.setcoc 0-5 // 设置常见的0-5房规\n' +
+        '.setcoc dg // delta green 扩展规则\n' +
+        '.setcoc details // 列出所有规则及其解释文本';
+    } else if (lower === 'sc' || lower === 'sancheck') {
+      text =
+        '理智检定指令：\n' +
+        '.sc <成功掉san>/<失败掉san> [san值]\n' +
+        '.sc <失败掉san> [san值]\n' +
+        '例：.sc 1/1d6 或 .sc 1d3';
+    } else if (lower === 'en') {
+      text =
+        '技能成长指令：\n' +
+        '.en <技能名> [技能点数] [+<成长值>]\n' +
+        '例：.en 侦查 或 .en 侦查 70 或 .en 侦查 +1d10';
+    } else if (lower === 'hp') {
+      text =
+        'HP 管理命令：\n' +
+        '.hp - 查看生命值\n' +
+        '.hp -<伤害> - 扣除生命值\n' +
+        '.hp +<治疗> - 恢复生命值\n' +
+        '.hp temp <数值> - 设定临时生命值\n' +
+        '.hp max <数值> - 设定最大生命值';
+    } else if (lower === 'log') {
+      text =
+        '跑团日志管理：\n' +
+        '.log new <日志名> - 新建并开启日志\n' +
+        '.log on - 恢复记录\n' +
+        '.log pause - 暂停记录\n' +
+        '.log end - 关闭日志\n' +
+        '.log stat - 查看当前状态';
+    } else if (lower === 'draw') {
+      text =
+        '牌堆命令：\n' +
+        '.draw [牌堆名] [张数] - 从牌堆抽牌 (默认塔罗牌)\n' +
+        '.deck list - 查看可用牌堆\n' +
+        '.deck reset [牌堆名] - 重置牌堆洗牌';
+    } else if (lower === 'deck') {
+      text =
+        '牌堆命令：\n' + '.deck list // 查看可用牌堆\n' + '.deck reset [牌堆名] // 重置牌堆洗牌';
+    } else if (lower === 'init' || lower === 'ri' || lower === 'initiative') {
+      text =
+        '先攻管理：\n' +
+        '.init // 查看先攻列表\n' +
+        '.init <先攻值> // 加入先攻\n' +
+        '.ri <技能表达式> // 掷骰加入先攻\n' +
+        '.init clr // 清空先攻列表';
+    } else if (lower === 'ss' || lower === 'spell' || lower === 'spellslots') {
+      text =
+        '法术位管理：\n' +
+        '.ss // 查看当前法术位\n' +
+        '.ss set <环阶> <当前值>/<最大值> // 设置法术位\n' +
+        '.ss use <环阶> // 消耗法术位\n' +
+        '.ss reset // 恢复所有法术位';
+    } else if (lower === 'ds' || arg === '死亡豁免') {
+      text =
+        '死亡豁免检定：\n' +
+        '.ds // 进行一次死亡豁免检定\n' +
+        '.ds status // 查看当前豁免状态\n' +
+        '.ds reset // 重置死亡豁免状态';
+    } else if (lower === 'longrest' || lower === 'rest') {
+      text = '.longrest // 进行一次长休并恢复全部HP与法术位';
+    } else if (lower === 'jrrp') {
+      text = '.jrrp // 今日人品';
+    } else if (lower === 'gugu') {
+      text = '.gugu // 随机召唤一只鸽子';
+    } else if (lower === 'name') {
+      text = '.name // 生成一个随机姓名';
+    } else if (lower === 'namednd') {
+      text = 'DND名字生成：\n' + '.namednd [精灵/矮人/兽人] [<数量>]\n' + '例：.namednd 精灵 3';
+    } else if (lower === 'modu' || arg === '魔都') {
+      text = '魔都模组网查询：\n' + '.modu <关键字> // 搜索模组\n' + '.modu help // 查看帮助';
+    } else if (lower === 'find') {
+      text = '查询指令：\n' + '.find <关键字> // 查找规则百科\n' + '例：.find 力量 或 .find 狂暴';
+    } else if (lower === 'userid' || lower === 'uid' || lower === 'id') {
+      text = '.userid // 查看自己的用户ID与场景标识';
+    } else if (lower === 'ti') {
+      text = '.ti // 临时疯狂症状检定';
+    } else if (lower === 'li') {
+      text = '.li // 总结疯狂症状检定';
+    } else {
+      const { matches } = searchRuleGlossary(fullArg, 3);
+      if (matches.length > 0) {
+        const entries = matches.map((m) => `📖 【${m.title}】\n${m.content}`);
+        text = `查询「${fullArg}」的结果：\n\n${entries.join('\n\n')}`;
+      } else {
+        text = '未找到搜索结果';
+      }
+    }
+  }
   const reply: PreparedReply = {
     executionId: input.executionId,
     part: 1,
@@ -4401,7 +4630,7 @@ export function createDefaultCommandRegistry(): CommandRegistry {
   registry.register(
     {
       name: 'help',
-      aliases: ['h', '?'],
+      aliases: ['h', '?', '帮助'],
       permission: 'all',
       allowedWhenDisabled: true,
       description: 'Show help message',

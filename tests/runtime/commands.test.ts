@@ -236,14 +236,161 @@ describe('Disabled conversation command execution', () => {
 describe('Help and userid commands', () => {
   const executor = new CommandExecutor();
 
-  it('provides command overview on .help', async () => {
+  it('provides command overview on .help without arguments', async () => {
     const ctx = createTestContext();
     const decision = await executor.execute(createTestEvent('.help'), ctx);
 
     expect(decision.results).toHaveLength(1);
     expect(decision.results[0]?.kind).toBe('help');
     expect(decision.replies).toHaveLength(1);
-    expect(decision.replies[0]?.text).toContain('DiceFunc Commands');
+    expect(decision.replies[0]?.text).toContain('DiceFunc 0.1.0');
+    expect(decision.replies[0]?.text).toContain('https://github.com/arcat0v0/dicefunc');
+    expect(decision.replies[0]?.text).toContain('.help 骰点/骰主/协议/娱乐/跑团/扩展/查询/其他');
+    expect(decision.replies[0]?.text).toContain('跑团机器人已就绪。');
+  });
+
+  it('supports .帮助 and .h aliases for help command', async () => {
+    const ctx = createTestContext();
+    const decisionZh = await executor.execute(createTestEvent('.帮助'), ctx);
+    const decisionH = await executor.execute(createTestEvent('.h'), ctx);
+
+    expect(decisionZh.replies[0]?.text).toContain('.help 骰点/骰主/协议/娱乐/跑团/扩展/查询/其他');
+    expect(decisionH.replies[0]?.text).toContain('.help 骰点/骰主/协议/娱乐/跑团/扩展/查询/其他');
+  });
+
+  it('provides help for specific subtopics', async () => {
+    const ctx = createTestContext();
+
+    const rollHelp = await executor.execute(createTestEvent('.help 骰点'), ctx);
+    expect(rollHelp.replies[0]?.text).toContain('.help 骰点：');
+    expect(rollHelp.replies[0]?.text).toContain('.r');
+    expect(rollHelp.replies[0]?.text).toContain('.ra 侦查');
+
+    const trpgHelp = await executor.execute(createTestEvent('.help 跑团'), ctx);
+    expect(trpgHelp.replies[0]?.text).toContain('.help 跑团：');
+    expect(trpgHelp.replies[0]?.text).toContain('.st');
+    expect(trpgHelp.replies[0]?.text).toContain('.coc');
+    expect(trpgHelp.replies[0]?.text).toContain('.pc');
+
+    const extHelp = await executor.execute(createTestEvent('.help 扩展'), ctx);
+    expect(extHelp.replies[0]?.text).toContain('.help 扩展：');
+    expect(extHelp.replies[0]?.text).toContain('.ext coc7 on');
+
+    const masterHelp = await executor.execute(createTestEvent('.help 骰主'), ctx);
+    expect(masterHelp.replies[0]?.text).toBe('骰主很神秘，什么都没有说——');
+
+    const agreementHelp = await executor.execute(createTestEvent('.help 协议'), ctx);
+    expect(agreementHelp.replies[0]?.text).toContain('请在遵守以下规则前提下使用:');
+
+    const funHelp = await executor.execute(createTestEvent('.help 娱乐'), ctx);
+    expect(funHelp.replies[0]?.text).toContain('帮助:娱乐');
+    expect(funHelp.replies[0]?.text).toContain('.gugu');
+    expect(funHelp.replies[0]?.text).toContain('.jrrp');
+
+    const otherHelp = await executor.execute(createTestEvent('.help 其他'), ctx);
+    expect(otherHelp.replies[0]?.text).toContain('帮助:其他');
+
+    const searchHelp = await executor.execute(createTestEvent('.help 查询'), ctx);
+    expect(searchHelp.replies[0]?.text).toContain('查询指令：');
+  });
+
+  it('provides meta help on .help help', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.help help'), ctx);
+
+    expect(decision.replies[0]?.text).toContain('帮助指令，用于查看指令帮助和helpdoc中录入的信息:');
+    expect(decision.replies[0]?.text).toContain('.help 指令');
+    expect(decision.replies[0]?.text).toContain('.help reload');
+  });
+
+  it('handles .help reload with and without master permission', async () => {
+    const masterCtx = createTestContext(
+      {},
+      {
+        permissions: {
+          isGroupHost: true,
+          isDiceMaster: true,
+          denied: false,
+          isTrusted: true,
+        },
+      },
+    );
+    const normalCtx = createTestContext(
+      {},
+      {
+        permissions: {
+          isGroupHost: false,
+          isDiceMaster: false,
+          denied: false,
+          isTrusted: true,
+        },
+      },
+    );
+
+    const masterDecision = await executor.execute(createTestEvent('.help reload'), masterCtx);
+    expect(masterDecision.replies[0]?.text).toBe('帮助文档已经重新装载');
+
+    const normalDecision = await executor.execute(createTestEvent('.help reload'), normalCtx);
+    expect(normalDecision.replies[0]?.text).toBe('你不具备Master权限');
+  });
+
+  it('provides specific command help for individual commands', async () => {
+    const ctx = createTestContext();
+
+    const rHelp = await executor.execute(createTestEvent('.help r'), ctx);
+    expect(rHelp.replies[0]?.text).toContain('.r <表达式>');
+
+    const rhHelp = await executor.execute(createTestEvent('.help rh'), ctx);
+    expect(rhHelp.replies[0]?.text).toContain('.rh <表达式>');
+
+    const stHelp = await executor.execute(createTestEvent('.help st'), ctx);
+    expect(stHelp.replies[0]?.text).toContain('.st');
+
+    const nnHelp = await executor.execute(createTestEvent('.help nn'), ctx);
+    expect(nnHelp.replies[0]?.text).toContain('角色名设置:');
+
+    const cocHelp = await executor.execute(createTestEvent('.help coc'), ctx);
+    expect(cocHelp.replies[0]?.text).toContain('COC制卡指令:');
+
+    const dndHelp = await executor.execute(createTestEvent('.help dnd'), ctx);
+    expect(dndHelp.replies[0]?.text).toContain('DND5E制卡指令:');
+
+    const botHelp = await executor.execute(createTestEvent('.help bot'), ctx);
+    expect(botHelp.replies[0]?.text).toContain('.bot on');
+
+    const setHelp = await executor.execute(createTestEvent('.help set'), ctx);
+    expect(setHelp.replies[0]?.text).toContain('群设置指令:');
+
+    const scHelp = await executor.execute(createTestEvent('.help sc'), ctx);
+    expect(scHelp.replies[0]?.text).toContain('理智检定指令：');
+
+    const enHelp = await executor.execute(createTestEvent('.help en'), ctx);
+    expect(enHelp.replies[0]?.text).toContain('技能成长指令：');
+
+    const hpHelp = await executor.execute(createTestEvent('.help hp'), ctx);
+    expect(hpHelp.replies[0]?.text).toContain('HP 管理命令：');
+
+    const drawHelp = await executor.execute(createTestEvent('.help draw'), ctx);
+    expect(drawHelp.replies[0]?.text).toContain('牌堆命令：');
+
+    const logHelp = await executor.execute(createTestEvent('.help log'), ctx);
+    expect(logHelp.replies[0]?.text).toContain('跑团日志管理：');
+
+    const moduHelp = await executor.execute(createTestEvent('.help modu'), ctx);
+    expect(moduHelp.replies[0]?.text).toContain('魔都模组网查询：');
+  });
+
+  it('searches rule glossary on unknown topic or reports no search result', async () => {
+    const ctx = createTestContext();
+
+    const glossaryHelp = await executor.execute(createTestEvent('.help 理智检定'), ctx);
+    expect(glossaryHelp.replies[0]?.text).toContain('理智检定');
+
+    const notFoundHelp = await executor.execute(
+      createTestEvent('.help 这是一个完全不存在的词条条目xyz123'),
+      ctx,
+    );
+    expect(notFoundHelp.replies[0]?.text).toBe('未找到搜索结果');
   });
 
   it('provides user and scene identifiers on .userid', async () => {
