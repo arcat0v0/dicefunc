@@ -21,6 +21,7 @@ export * from './domain/story-log/log.js';
 export * from './domain/dice/ast.js';
 export * from './domain/dice/expression.js';
 export * from './domain/dice/parser.js';
+export * from './domain/hidden-roll/binding.js';
 export * from './domain/rules/coc7/check.js';
 export * from './domain/rules/coc7/house-rules.js';
 export * from './domain/rules/coc7/sanity.js';

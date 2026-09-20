@@ -181,6 +181,35 @@ export async function handleQQWebhook(
 
   if (payload.op === 0) {
     const t = typeof payload.t === 'string' ? payload.t : '';
+    const d = (payload.d ?? {}) as Record<string, unknown>;
+
+    if (t === 'C2C_MSG_RECEIVE' || t === 'C2C_MSG_REJECT') {
+      const userOpenid = typeof d.openid === 'string' ? d.openid : '';
+      if (!userOpenid) {
+        return { status: 400, body: { ret: -1, msg: 'bad request' } };
+      }
+      const eventId =
+        typeof payload.id === 'string'
+          ? payload.id
+          : `${t}:${typeof d.timestamp === 'number' ? d.timestamp : input.timestamp}`;
+      await deps.stateStore.setC2cActiveAuthorization(
+        deps.botId,
+        userOpenid,
+        t === 'C2C_MSG_RECEIVE',
+        eventId,
+      );
+      logger.log(
+        buildLogEntry({
+          level: 'info',
+          event: 'qq.c2c.authorization_changed',
+          component: 'qq-webhook',
+          environment: 'production',
+          outcome: t === 'C2C_MSG_RECEIVE' ? 'enabled' : 'disabled',
+        }),
+      );
+      return { status: 200, body: { ret: 0, msg: 'ok' } };
+    }
+
     let scene: SceneType;
     if (t === 'GROUP_AT_MESSAGE_CREATE') {
       scene = 'groupAt';
@@ -191,8 +220,6 @@ export async function handleQQWebhook(
     } else {
       return { status: 200, body: { ret: 0 } };
     }
-
-    const d = (payload.d ?? {}) as Record<string, unknown>;
     const author = (d.author ?? {}) as Record<string, unknown>;
 
     const eventId =

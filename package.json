@@ -8,8 +8,8 @@
     "test:unit": "vitest run",
     "test:integration": "vitest run -c tests/integration/vitest.config.ts",
     "test:runtime": "vitest run tests/runtime/",
-    "dev:worker": "wrangler dev -c apps/worker/wrangler.jsonc",
-    "deploy:worker": "wrangler deploy -c apps/worker/wrangler.jsonc"
+    "dev:worker": "tsc -b && wrangler dev -c apps/worker/wrangler.jsonc",
+    "deploy:worker": "tsc -b && wrangler deploy -c apps/worker/wrangler.jsonc"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",

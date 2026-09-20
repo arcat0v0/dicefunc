@@ -91,7 +91,7 @@ class Tokenizer {
       const modStr = diceMatch[4];
       const keepCountStr = diceMatch[5];
 
-      const count = countStr !== undefined ? Number.parseInt(countStr, 10) : 1;
+      let count = countStr !== undefined ? Number.parseInt(countStr, 10) : 1;
       const faces = facesStr !== undefined ? Number.parseInt(facesStr, 10) : this.defaultSides;
 
       if (Number.isNaN(count) || count <= 0) {
@@ -124,6 +124,17 @@ class Tokenizer {
         } else if (lowerMod === 'dl') {
           keepDrop = 'dl';
           keepCount = keepCountStr !== undefined ? Number.parseInt(keepCountStr, 10) : 1;
+        }
+
+        if (
+          countStr === undefined &&
+          (lowerMod === '优势' ||
+            lowerMod === '優勢' ||
+            lowerMod === '劣势' ||
+            lowerMod === '劣勢' ||
+            ((lowerMod === 'kh' || lowerMod === 'kl') && keepCountStr === undefined))
+        ) {
+          count = 2;
         }
 
         if (keepCount !== undefined && (Number.isNaN(keepCount) || keepCount <= 0)) {

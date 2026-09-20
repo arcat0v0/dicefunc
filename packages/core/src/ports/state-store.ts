@@ -1,4 +1,5 @@
 import type { CharacterSheet } from '../domain/character/sheet.js';
+import type { HiddenRollBinding, HiddenRollLinkChallenge } from '../domain/hidden-roll/binding.js';
 import type { PolicyEntry } from '../domain/policy/policy.js';
 import type { ConversationSession } from '../domain/session/conversation.js';
 
@@ -97,6 +98,30 @@ export type StateUpdate =
         readonly state: unknown;
       };
       readonly newVersion: number;
+    }
+  | {
+      readonly type: 'hidden-roll-link-challenge';
+      readonly challengeId: string;
+      readonly c2cPrincipalId: string;
+      readonly userOpenid: string;
+      readonly tokenHash: string;
+      readonly expiresAt: Date;
+    }
+  | {
+      readonly type: 'hidden-roll-binding';
+      readonly bindingId: string;
+      readonly challengeId: string;
+      readonly expectedChallengeVersion: number;
+      readonly groupScopeId: string;
+      readonly groupPrincipalId: string;
+      readonly c2cPrincipalId: string;
+      readonly userOpenid: string;
+    }
+  | {
+      readonly type: 'hidden-roll-unbind';
+      readonly bindingId: string;
+      readonly expectedVersion: number;
+      readonly newVersion: number;
     };
 
 export interface CommandResult {
@@ -112,11 +137,18 @@ export interface PreparedReply {
   readonly msgSeq: number;
   readonly scene: SceneType;
   readonly targetId: string;
-  readonly originMessageId: string;
+  readonly originMessageId?: string | undefined;
   readonly templateKey: string;
   readonly variantId?: string | undefined;
   readonly text: string;
   readonly deadline: Date;
+  readonly deliveryMode?: 'passive' | 'active' | undefined;
+  readonly condition?:
+    | {
+        readonly part: number;
+        readonly status: 'sent' | 'failed';
+      }
+    | undefined;
 }
 
 export interface InboundLogItem {
@@ -180,6 +212,8 @@ export interface StateSnapshot {
       }
     | undefined;
   readonly sheet?: CharacterSheet | undefined;
+  readonly hiddenRollBinding?: HiddenRollBinding | undefined;
+  readonly c2cActiveMessagesEnabled?: boolean | undefined;
   readonly policyEntries: PolicyEntry[];
   readonly permissions: Permissions;
   readonly activeStoryLog?:
@@ -243,10 +277,24 @@ export interface JobLease {
   readonly fencingToken: number;
 }
 
-export interface StateStore {
+export interface HiddenRollLinkReader {
+  findHiddenRollLinkChallenge(
+    botId: string,
+    tokenHash: string,
+    now: Date,
+  ): Promise<HiddenRollLinkChallenge | null>;
+}
+
+export interface StateStore extends HiddenRollLinkReader {
   claimEvent(event: VerifiedEvent, configDigest: string): Promise<EventClaim>;
   loadSnapshot(scope: CommandScope): Promise<StateSnapshot>;
   commit(plan: CommandCommit): Promise<CommitOutcome>;
+  setC2cActiveAuthorization(
+    botId: string,
+    userOpenid: string,
+    enabled: boolean,
+    eventId: string,
+  ): Promise<void>;
   getJob(botId: string, jobId: string): Promise<StoredJob | null>;
   acquireJob(botId: string, jobId: string, leaseSeconds: number): Promise<JobLease | null>;
   completeJob(

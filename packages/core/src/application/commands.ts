@@ -18,6 +18,11 @@ import {
 } from '../domain/fun/modu.js';
 import { generateDndName, generateRandomName } from '../domain/fun/name.js';
 import {
+  createHiddenRollLinkToken,
+  hashHiddenRollLinkToken,
+  isHiddenRollLinkToken,
+} from '../domain/hidden-roll/binding.js';
+import {
   type Coc7CardAttributes,
   formatCoc7CardBatch,
   formatCoc7CardSingle,
@@ -66,6 +71,7 @@ import type { Clock } from '../ports/clock.js';
 import type { RandomSource } from '../ports/random-source.js';
 import type {
   CommandResult,
+  HiddenRollLinkReader,
   InboundLogItem,
   Permissions,
   PreparedReply,
@@ -121,6 +127,7 @@ export interface CommandContext {
   readonly budget: CommandBudget;
   readonly configVersion: string;
   readonly botId: string;
+  readonly hiddenRollLinks?: HiddenRollLinkReader | undefined;
 }
 
 export interface CommandDecision {
@@ -197,10 +204,21 @@ export class DefaultCommandRegistry implements CommandRegistry {
 }
 
 async function rollHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
-  const exprText =
+  let exprText =
     input.args.length > 0
       ? input.args.join(' ').trim()
       : `d${context.snapshot.conversation.diceSides}`;
+
+  const commandName = input.commandName.toLowerCase();
+  const restoresLeadingDice =
+    commandName === 'rd' || commandName === 'rhd' || commandName === 'rdh';
+  if (input.args.length > 0 && restoresLeadingDice) {
+    if (/^\d|优势|劣势|\+|-/.test(exprText)) {
+      const rawBody = input.rawText.replace(/^[.。!！/]/, '').trimStart();
+      const spaceBeforeArgs = /^\s/.test(rawBody.slice(input.commandName.length));
+      exprText = `${spaceBeforeArgs ? 'd ' : 'd'}${exprText}`;
+    }
+  }
 
   const parseResult = parseDiceExpression(exprText, context.snapshot.conversation.diceSides);
 
@@ -338,12 +356,249 @@ async function rollHandler(input: CommandInput, context: CommandContext): Promis
   };
 }
 
+async function hiddenRollBindingHandler(
+  input: CommandInput,
+  context: CommandContext,
+): Promise<CommandDecision> {
+  const conversation = context.snapshot.conversation;
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+  let text: string;
+  let templateKey = 'dice.hidden.binding';
+  const updates: StateUpdate[] = [];
+
+  if (conversation.scene === 'c2c') {
+    if (!context.snapshot.c2cActiveMessagesEnabled) {
+      text = '请先在 QQ 机器人资料卡开启“主动消息”，然后重新发送 .rhbind。';
+      templateKey = 'dice.hidden.binding.authorization_required';
+    } else if (input.args[0]?.toLowerCase() === 'off') {
+      text = '请在需要解绑的群里发送 .rhbind off。';
+    } else {
+      const principalId = context.snapshot.principalId;
+      if (!principalId) {
+        text = '当前私聊身份尚未初始化，请稍后重试。';
+        templateKey = 'dice.hidden.binding.error';
+      } else {
+        const { token, tokenHash } = await createHiddenRollLinkToken(context.random);
+        const expiresAt = new Date(context.clock.now().getTime() + 600_000);
+        updates.push({
+          type: 'hidden-roll-link-challenge',
+          challengeId: `hrc_${input.eventId}`,
+          c2cPrincipalId: principalId,
+          userOpenid: conversation.externalId,
+          tokenHash,
+          expiresAt,
+        });
+        text = `绑定令牌：${token}\n请在 10 分钟内到目标群发送：.rhbind ${token}\n令牌只能使用一次。`;
+      }
+    }
+  } else {
+    const subcommand = input.args[0]?.trim() ?? '';
+    const binding = context.snapshot.hiddenRollBinding;
+
+    if (!subcommand || subcommand.toLowerCase() === 'help') {
+      text = binding
+        ? binding.activeMessagesEnabled
+          ? '本群暗骰私聊绑定有效。使用 .rh <表达式> 进行暗骰；使用 .rhbind off 解绑。'
+          : '本群已有绑定，但主动消息授权已关闭。请先在 QQ 机器人资料卡重新开启主动消息。'
+        : '请先私聊机器人发送 .rhbind 获取一次性令牌，再在本群发送 .rhbind <令牌>。';
+    } else if (subcommand.toLowerCase() === 'off') {
+      if (!binding) {
+        text = '本群尚未绑定暗骰私聊。';
+      } else {
+        updates.push({
+          type: 'hidden-roll-unbind',
+          bindingId: binding.id,
+          expectedVersion: binding.version,
+          newVersion: binding.version + 1,
+        });
+        text = '已解除本群暗骰私聊绑定。';
+      }
+    } else if (binding) {
+      text = '本群已经绑定暗骰私聊；如需更换，请先发送 .rhbind off。';
+    } else if (!isHiddenRollLinkToken(subcommand)) {
+      text = '绑定令牌格式无效。请私聊机器人重新发送 .rhbind 获取令牌。';
+      templateKey = 'dice.hidden.binding.error';
+    } else if (!context.hiddenRollLinks || !context.snapshot.principalId) {
+      text = '当前无法验证绑定令牌，请稍后重试。';
+      templateKey = 'dice.hidden.binding.error';
+    } else {
+      const tokenHash = await hashHiddenRollLinkToken(subcommand);
+      const challenge = await context.hiddenRollLinks.findHiddenRollLinkChallenge(
+        context.botId,
+        tokenHash,
+        context.clock.now(),
+      );
+      if (!challenge) {
+        text = '绑定令牌无效、已使用或已过期。请私聊机器人重新获取。';
+        templateKey = 'dice.hidden.binding.error';
+      } else if (!challenge.activeMessagesEnabled) {
+        text = '主动消息授权已关闭。请先在 QQ 机器人资料卡重新开启，再重新获取绑定令牌。';
+        templateKey = 'dice.hidden.binding.authorization_required';
+      } else {
+        updates.push({
+          type: 'hidden-roll-binding',
+          bindingId: `hrb_${input.eventId}`,
+          challengeId: challenge.id,
+          expectedChallengeVersion: challenge.version,
+          groupScopeId: conversation.externalId,
+          groupPrincipalId: context.snapshot.principalId,
+          c2cPrincipalId: challenge.c2cPrincipalId,
+          userOpenid: challenge.userOpenid,
+        });
+        text = '暗骰私聊绑定成功。以后可以在本群使用 .rh <表达式>。';
+      }
+    }
+  }
+
+  const reply: PreparedReply = {
+    executionId: input.executionId,
+    part: 1,
+    msgSeq: 1,
+    scene: conversation.scene,
+    targetId: conversation.externalId,
+    originMessageId: input.messageId,
+    templateKey,
+    text,
+    deadline,
+  };
+  return {
+    results: [],
+    updates,
+    replies: [reply],
+    logItems: [],
+  };
+}
+
+async function hiddenRollHandler(
+  input: CommandInput,
+  context: CommandContext,
+): Promise<CommandDecision> {
+  const conversation = context.snapshot.conversation;
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+
+  if (conversation.scene === 'c2c') {
+    const decision = await rollHandler(input, context);
+    if (decision.results.length === 0) {
+      return decision;
+    }
+    return {
+      results: decision.results.map((result) => ({
+        ...result,
+        data: {
+          ...result.data,
+          hidden: true,
+        },
+      })),
+      updates: decision.updates,
+      replies: decision.replies.map((reply) => ({
+        ...reply,
+        templateKey: 'dice.hidden.roll',
+      })),
+      logItems: decision.logItems,
+    };
+  }
+
+  const binding = context.snapshot.hiddenRollBinding;
+  if (!binding) {
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conversation.scene,
+      targetId: conversation.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'dice.hidden.binding_required',
+      text: '尚未绑定暗骰私聊。请先私聊机器人发送 .rhbind 获取令牌，再回本群完成绑定。',
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  if (!binding.activeMessagesEnabled) {
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conversation.scene,
+      targetId: conversation.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'dice.hidden.authorization_required',
+      text: '暗骰私聊的主动消息授权已关闭。请在 QQ 机器人资料卡重新开启后再试。',
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  const decision = await rollHandler(input, context);
+  if (decision.results.length === 0) {
+    return decision;
+  }
+
+  const privateResult = decision.replies[0]?.text;
+  if (!privateResult) {
+    return { results: [], updates: [], replies: [], logItems: [] };
+  }
+
+  const results = decision.results.map((result) => ({
+    ...result,
+    data: {
+      ...result.data,
+      hidden: true,
+    },
+  }));
+  const replies: PreparedReply[] = [
+    {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: 'c2c',
+      targetId: binding.userOpenid,
+      templateKey: 'dice.hidden.roll',
+      text: privateResult,
+      deadline,
+      deliveryMode: 'active',
+    },
+    {
+      executionId: input.executionId,
+      part: 2,
+      msgSeq: 1,
+      scene: conversation.scene,
+      targetId: conversation.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'dice.hidden.group_sent',
+      text: '暗骰已完成，结果已私聊发送。',
+      deadline,
+      condition: { part: 1, status: 'sent' },
+    },
+    {
+      executionId: input.executionId,
+      part: 3,
+      msgSeq: 1,
+      scene: conversation.scene,
+      targetId: conversation.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'dice.hidden.group_failed',
+      text: '暗骰结果私聊发送失败，结果未在群内公开。请检查主动消息授权后重试。',
+      deadline,
+      condition: { part: 1, status: 'failed' },
+    },
+  ];
+
+  return {
+    results,
+    updates: decision.updates,
+    replies,
+    logItems: decision.logItems,
+  };
+}
+
 async function helpHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
   const deadline = new Date(input.timestamp.getTime() + 300_000);
   const text =
     'DiceFunc Commands:\n' +
     '.r [expr] [reason] - Roll dice (e.g. .r 1d100, .r 3d6+2)\n' +
-    '.bot on/off - Enable or disable bot in this conversation\n' +
+    '.rh [expr] [reason] - Hidden roll using trusted C2C binding\n' +
+    '.rhbind - Create, inspect, or remove a hidden-roll C2C binding\n' +
     '.set rule <coc7|dnd5e> - Set conversation rule set\n' +
     '.set sides <number> - Set default dice sides\n' +
     '.userid - View your user ID\n' +
@@ -4140,6 +4395,28 @@ export function createDefaultCommandRegistry(): CommandRegistry {
       description: 'Roll dice',
     },
     rollHandler,
+  );
+
+  registry.register(
+    {
+      name: 'rh',
+      aliases: ['rhd', 'rdh'],
+      permission: 'all',
+      allowedWhenDisabled: false,
+      description: 'Roll dice through a trusted C2C binding',
+    },
+    hiddenRollHandler,
+  );
+
+  registry.register(
+    {
+      name: 'rhbind',
+      aliases: [],
+      permission: 'all',
+      allowedWhenDisabled: true,
+      description: 'Manage hidden-roll C2C binding',
+    },
+    hiddenRollBindingHandler,
   );
 
   registry.register(

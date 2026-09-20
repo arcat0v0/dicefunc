@@ -5,6 +5,7 @@ import {
   CommandExecutor,
   type ConversationSession,
   DefaultCommandRegistry,
+  type HiddenRollLinkReader,
   type StateSnapshot,
   type VerifiedEvent,
   createCharacterSheet,
@@ -18,6 +19,7 @@ import { describe, expect, it } from 'vitest';
 function createTestContext(
   conversationOverrides: Partial<ConversationSession> = {},
   snapshotOverrides: Partial<StateSnapshot> = {},
+  hiddenRollLinks?: HiddenRollLinkReader,
 ): CommandContext {
   const baseConversation = createConversationSession({
     id: 'conv_test_1',
@@ -71,6 +73,7 @@ function createTestContext(
     },
     configVersion: '1.0.0',
     botId: 'bot_test_1',
+    ...(hiddenRollLinks ? { hiddenRollLinks } : {}),
   };
 }
 
@@ -86,6 +89,19 @@ function createTestEvent(text: string): VerifiedEvent {
     sender: {
       scene: 'groupAt',
       scopeId: 'group_ext_1',
+      externalId: 'user_ext_1',
+    },
+  };
+}
+
+function createC2cTestEvent(text: string): VerifiedEvent {
+  return {
+    ...createTestEvent(text),
+    scene: 'c2c',
+    externalId: 'user_ext_1',
+    sender: {
+      scene: 'c2c',
+      scopeId: 'user_ext_1',
       externalId: 'user_ext_1',
     },
   };
@@ -732,6 +748,301 @@ describe('Character generation commands (.coc / .dnd) and seamless prefix parsin
 
     const decision2 = await executor.execute(createTestEvent('！r 1d20'), ctx);
     expect(decision2.results).toHaveLength(1);
+  });
+});
+
+describe('Roll command rd-alias compat parsing (.rd)', () => {
+  const executor = new CommandExecutor();
+
+  it('restores leading d for .rd20+d10+d4 like SealDice compat mode', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.rd20+d10+d4'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]?.kind).toBe('dice_roll');
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toMatch(
+      /^d20\+d10\+d4 = \[\d+\] \+ \[\d+\] \+ \[\d+\] = \d+$/,
+    );
+  });
+
+  it('restores leading d for .rd20 without space', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.rd20'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('1d20');
+  });
+
+  it('treats .rd 20 with space as default die with reason like SealDice', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.rd 20'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('1d100');
+  });
+
+  it('restores leading d for .rd+5 modifier form', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.rd+5'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('1d100+5');
+  });
+
+  it('does not duplicate d when expression already starts with d on .rd d20', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.rd d20'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('1d20');
+  });
+});
+
+describe('Advantage and disadvantage dice suffixes', () => {
+  const executor = new CommandExecutor();
+
+  it('rolls two dice and keeps the highest for d20优势', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.r d20优势'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    const match = decision.replies[0]?.text.match(/^2d20 = \[(\d+), (\d+)\] = (\d+)$/);
+    expect(match).not.toBeNull();
+    const first = Number(match?.[1]);
+    const second = Number(match?.[2]);
+    const total = Number(match?.[3]);
+    expect(total).toBe(Math.max(first, second));
+  });
+
+  it('rolls two dice and keeps the lowest for d20劣势', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.r d20劣势'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    const match = decision.replies[0]?.text.match(/^2d20 = \[(\d+), (\d+)\] = (\d+)$/);
+    expect(match).not.toBeNull();
+    const first = Number(match?.[1]);
+    const second = Number(match?.[2]);
+    const total = Number(match?.[3]);
+    expect(total).toBe(Math.min(first, second));
+  });
+
+  it('uses default sides while rolling two dice for d优势', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.r d优势'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.replies[0]?.text).toMatch(/^2d100 = \[\d+, \d+\] = \d+$/);
+  });
+});
+
+describe('Hidden roll command (.rh)', () => {
+  const executor = new CommandExecutor();
+  const activeBinding = {
+    id: 'hrb_test',
+    groupScopeId: 'group_ext_1',
+    groupPrincipalId: 'group_principal_1',
+    c2cPrincipalId: 'c2c_principal_1',
+    userOpenid: 'user_c2c_1',
+    activeMessagesEnabled: true,
+    version: 1,
+  };
+
+  it('guides unbound group users without consuming dice', async () => {
+    const ctx = createTestContext({}, { principalId: 'group_principal_1' });
+    const decision = await executor.execute(createTestEvent('.rh d20 秘密行动'), ctx);
+
+    expect(decision.results).toHaveLength(0);
+    expect(ctx.budget.consumed.diceRolls).toBe(0);
+    expect(decision.replies[0]).toMatchObject({
+      scene: 'groupAt',
+      templateKey: 'dice.hidden.binding_required',
+    });
+    expect(decision.replies[0]?.text).toContain('.rhbind');
+  });
+
+  it('creates an active C2C result and mutually exclusive group notices', async () => {
+    const ctx = createTestContext(
+      {},
+      {
+        principalId: 'group_principal_1',
+        hiddenRollBinding: activeBinding,
+      },
+    );
+    const decision = await executor.execute(createTestEvent('.rh d20 秘密行动'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]?.data.hidden).toBe(true);
+    expect(decision.replies).toHaveLength(3);
+    expect(decision.replies[0]).toMatchObject({
+      scene: 'c2c',
+      targetId: 'user_c2c_1',
+      templateKey: 'dice.hidden.roll',
+      deliveryMode: 'active',
+    });
+    expect(decision.replies[0]?.originMessageId).toBeUndefined();
+    expect(decision.replies[0]?.text).toMatch(/^1d20 = \[\d+\] = \d+ 秘密行动$/);
+    expect(decision.replies[1]).toMatchObject({
+      scene: 'groupAt',
+      templateKey: 'dice.hidden.group_sent',
+      condition: { part: 1, status: 'sent' },
+    });
+    expect(decision.replies[2]).toMatchObject({
+      scene: 'groupAt',
+      templateKey: 'dice.hidden.group_failed',
+      condition: { part: 1, status: 'failed' },
+    });
+    expect(decision.replies.slice(1).every((reply) => !reply.text.includes('['))).toBe(true);
+  });
+
+  it('refuses a bound group roll after active-message authorization is disabled', async () => {
+    const ctx = createTestContext(
+      {},
+      {
+        principalId: 'group_principal_1',
+        hiddenRollBinding: {
+          ...activeBinding,
+          activeMessagesEnabled: false,
+        },
+      },
+    );
+    const decision = await executor.execute(createTestEvent('.rh d20'), ctx);
+
+    expect(decision.results).toHaveLength(0);
+    expect(ctx.budget.consumed.diceRolls).toBe(0);
+    expect(decision.replies[0]?.templateKey).toBe('dice.hidden.authorization_required');
+  });
+
+  it('returns a hidden roll result inside a C2C conversation', async () => {
+    const ctx = createTestContext({
+      scene: 'c2c',
+      externalId: 'user_ext_1',
+    });
+    const decision = await executor.execute(createC2cTestEvent('.rh d20 秘密行动'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]).toMatchObject({
+      kind: 'dice_roll',
+      data: {
+        hidden: true,
+      },
+    });
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]).toMatchObject({
+      scene: 'c2c',
+      targetId: 'user_ext_1',
+      templateKey: 'dice.hidden.roll',
+    });
+    expect(decision.replies[0]?.text).toMatch(/^1d20 = \[\d+\] = \d+ 秘密行动$/);
+  });
+
+  it('supports SealDice rhd and rdh aliases with compact dice expressions', async () => {
+    for (const command of ['.rhd20', '.rdh20']) {
+      const ctx = createTestContext({
+        scene: 'c2c',
+        externalId: 'user_ext_1',
+      });
+      const decision = await executor.execute(createC2cTestEvent(command), ctx);
+
+      expect(decision.results).toHaveLength(1);
+      expect(decision.results[0]?.data.hidden).toBe(true);
+      expect(decision.replies[0]?.text).toMatch(/^1d20 = \[\d+\] = \d+$/);
+    }
+  });
+});
+
+describe('Hidden roll trusted binding command (.rhbind)', () => {
+  const executor = new CommandExecutor();
+
+  it('requires active-message authorization before issuing a private token', async () => {
+    const ctx = createTestContext(
+      { scene: 'c2c', externalId: 'user_ext_1' },
+      { principalId: 'c2c_principal_1', c2cActiveMessagesEnabled: false },
+    );
+    const decision = await executor.execute(createC2cTestEvent('.rhbind'), ctx);
+
+    expect(decision.updates).toHaveLength(0);
+    expect(decision.replies[0]?.templateKey).toBe('dice.hidden.binding.authorization_required');
+  });
+
+  it('issues a single-use 256-bit binding token in C2C', async () => {
+    const ctx = createTestContext(
+      { scene: 'c2c', externalId: 'user_ext_1' },
+      { principalId: 'c2c_principal_1', c2cActiveMessagesEnabled: true },
+    );
+    const decision = await executor.execute(createC2cTestEvent('.rhbind'), ctx);
+
+    expect(decision.updates).toHaveLength(1);
+    expect(decision.updates[0]).toMatchObject({
+      type: 'hidden-roll-link-challenge',
+      c2cPrincipalId: 'c2c_principal_1',
+      userOpenid: 'user_ext_1',
+    });
+    const token = decision.replies[0]?.text.match(/绑定令牌：([A-Za-z0-9_-]{43})/)?.[1];
+    expect(token).toHaveLength(43);
+  });
+
+  it('consumes a private token to bind the current group principal', async () => {
+    const token = 'A'.repeat(43);
+    const hiddenRollLinks: HiddenRollLinkReader = {
+      findHiddenRollLinkChallenge: async () => ({
+        id: 'challenge_1',
+        c2cPrincipalId: 'c2c_principal_1',
+        userOpenid: 'user_c2c_1',
+        version: 1,
+        expiresAt: new Date(Date.now() + 600_000),
+        activeMessagesEnabled: true,
+      }),
+    };
+    const ctx = createTestContext({}, { principalId: 'group_principal_1' }, hiddenRollLinks);
+    const decision = await executor.execute(createTestEvent(`.rhbind ${token}`), ctx);
+
+    expect(decision.updates).toEqual([
+      {
+        type: 'hidden-roll-binding',
+        bindingId: 'hrb_evt_1',
+        challengeId: 'challenge_1',
+        expectedChallengeVersion: 1,
+        groupScopeId: 'group_ext_1',
+        groupPrincipalId: 'group_principal_1',
+        c2cPrincipalId: 'c2c_principal_1',
+        userOpenid: 'user_c2c_1',
+      },
+    ]);
+    expect(decision.replies[0]?.text).toContain('绑定成功');
+  });
+
+  it('revokes the current group binding', async () => {
+    const ctx = createTestContext(
+      {},
+      {
+        principalId: 'group_principal_1',
+        hiddenRollBinding: {
+          id: 'binding_1',
+          groupScopeId: 'group_ext_1',
+          groupPrincipalId: 'group_principal_1',
+          c2cPrincipalId: 'c2c_principal_1',
+          userOpenid: 'user_c2c_1',
+          activeMessagesEnabled: true,
+          version: 3,
+        },
+      },
+    );
+    const decision = await executor.execute(createTestEvent('.rhbind off'), ctx);
+
+    expect(decision.updates).toEqual([
+      {
+        type: 'hidden-roll-unbind',
+        bindingId: 'binding_1',
+        expectedVersion: 3,
+        newVersion: 4,
+      },
+    ]);
   });
 });
 

@@ -79,6 +79,37 @@ describe('QQReplySender integration', () => {
     expect(capturedUrl).toBe('https://api.sgroup.qq.com/v2/users/user_target_openid_456/messages');
   });
 
+  it('sends active C2C messages without a passive msg_id or msg_seq', async () => {
+    let capturedBody: Record<string, unknown> = {};
+    const fakeHttpClient = async (_url: string, init: RequestInit): Promise<Response> => {
+      capturedBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ id: 'platform_msg_c2c_active' }), { status: 200 });
+    };
+    const sender = new QQReplySender({
+      tokenProvider: fakeTokenProvider,
+      httpClient: fakeHttpClient,
+    });
+    const reply: PreparedReply = {
+      executionId: 'exec_c2c_active',
+      part: 1,
+      msgSeq: 1,
+      scene: 'c2c',
+      targetId: 'user_target_openid_active',
+      templateKey: 'dice.hidden.roll',
+      text: '1d20 = [20] = 20',
+      deadline: new Date(Date.now() + 60000),
+      deliveryMode: 'active',
+    };
+
+    const outcome = await sender.send(reply);
+
+    expect(outcome.status).toBe('sent');
+    expect(capturedBody).toEqual({
+      content: '1d20 = [20] = 20',
+      msg_type: 0,
+    });
+  });
+
   it('classifies 429 as retryable', async () => {
     const fakeHttpClient = async (): Promise<Response> =>
       new Response(JSON.stringify({ message: 'rate limited' }), { status: 429 });

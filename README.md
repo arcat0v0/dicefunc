@@ -52,7 +52,7 @@ dicefunc/
 - **QQ 开放平台 Webhook 适配**:
   - 按官方协议从 AppSecret 派生 Ed25519 密钥，对 `timestamp + body` 验签（缺失凭据或验签失败直接 401，经官方向量验证）；
   - 平台校验应答：支持 `op: 13` 回调验证（按官方算法签名 `event_ts + plain_token` 应答，官方向量逐字节匹配）；
-  - 消息场景解析：映射群聊 @ 消息（`GROUP_AT_MESSAGE_CREATE`）、C2C 私聊（`C2C_MESSAGE_CREATE`）与频道私信（`DIRECT_MESSAGE_CREATE`）；
+  - 消息场景解析：映射群聊 @ 消息（`GROUP_AT_MESSAGE_CREATE`）、C2C 私聊（`C2C_MESSAGE_CREATE`）、主动消息授权变更（`C2C_MSG_RECEIVE` / `C2C_MSG_REJECT`）与频道私信（`DIRECT_MESSAGE_CREATE`）；
   - 状态持久化：`inbox` 接收记录与 `job` 调度任务在 StateStore 中原子落库；
   - 队列调度：`COMMAND_QUEUE` 仅传递 `{ jobId, botId }` 最小元数据。
 - **D1 状态存储 (StateStore)**:
@@ -66,7 +66,7 @@ dicefunc/
   - 严格字段白名单机制，过滤所有敏感字段（密钥、token、聊天正文等）；
   - 单条序列化日志严格执行 8 KiB 截断，超限安全截断并标记。
 - **数据库架构**:
-  - `migrations/001_initial_schema.sql` 提供 21 张完整表，包含强一致性版本守卫与复合唯一约束。
+  - `migrations/001_initial_schema.sql` 至 `003_hidden_roll_bindings.sql` 提供基础架构、任务恢复索引与暗骰可信绑定/条件投递状态。
 
 ### 未实现 / 后续规划 (P1-P8)
 
@@ -82,7 +82,10 @@ dicefunc/
 
 当前核心框架注册并支持的命令：
 
-- `.r [expr] [reason]` - 基础掷骰（例如 `.r 1d100`、`.r 3d6+2 力量检定`）
+- `.r [expr] [reason]` - 基础掷骰（例如 `.r 1d100`、`.r d20优势`、`.r 3d6+2 力量检定`）
+- `.rh [expr] [reason]` / `.rhd` / `.rdh` - 暗骰；C2C 中直接返回结果，群聊中仅在可信绑定后主动私聊发送，群内只报告发送成功或失败，绝不公开结果
+  - 首次使用：在 QQ 启用机器人的主动消息权限，私聊发送 `.rhbind` 获取 10 分钟有效的一次性令牌，再到目标群发送 `.rhbind <令牌>`
+  - 解除绑定：在目标群发送 `.rhbind off`
 - `.help` / `.h` / `.?` - 查看命令帮助列表
 - `.set rule <coc7|dnd5e>` - 切换当前会话规则集
 - `.set sides <number>` - 修改当前会话默认骰子面数
@@ -195,7 +198,7 @@ npx wrangler d1 migrations apply dicefunc-db --remote -c apps/worker/wrangler.js
 npx wrangler d1 migrations apply dicefunc-db --local -c apps/worker/wrangler.jsonc
 ```
 
-远程命令会列出待执行的迁移并询问，输入 `y` 回车。成功标志：`🌀 Mapping SQL input into an array of statements ... ✅` 且列出 `001_initial_schema.sql` 已应用（共 21 张表）。
+远程命令会列出待执行的迁移并询问，输入 `y` 回车。成功标志：`🌀 Mapping SQL input into an array of statements ... ✅`，且 `001_initial_schema.sql` 至 `003_hidden_roll_bindings.sql` 均已应用。
 
 ### 4. 拿到 QQ 机器人的两份密钥
 
@@ -204,7 +207,7 @@ npx wrangler d1 migrations apply dicefunc-db --local -c apps/worker/wrangler.jso
 然后在机器人后台的 webhook 设置页（开发设置 → 事件订阅/回调配置）：
 
 - 回调地址填 `https://<第 2 步复制的 Worker 域名>/webhooks/qq`（`workers.dev` 默认 443 端口，符合平台允许的 80/443/8080/8443）；
-- 勾选要监听的事件：群聊 @ 消息（`GROUP_AT_MESSAGE_CREATE`），按需加 C2C 私聊（`C2C_MESSAGE_CREATE`）。
+- 勾选群聊 @ 消息（`GROUP_AT_MESSAGE_CREATE`）和 C2C 私聊（`C2C_MESSAGE_CREATE`）；要使用群内暗骰，还必须订阅主动消息授权变更（`C2C_MSG_RECEIVE`、`C2C_MSG_REJECT`）。
 
 先保存即可，"校验"按钮留到第 7 步再点。
 

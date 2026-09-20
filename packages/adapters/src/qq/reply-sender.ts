@@ -47,19 +47,34 @@ export class QQReplySender implements ReplySender {
         ? `${this.baseUrl}/v2/users/${encodeURIComponent(reply.targetId)}/messages`
         : `${this.baseUrl}/v2/groups/${encodeURIComponent(reply.targetId)}/messages`;
 
-    const payload = {
+    const payload: {
+      content: string;
+      msg_type: number;
+      msg_id?: string;
+      msg_seq?: number;
+    } = {
       content: reply.text,
       msg_type: 0,
-      msg_id: reply.originMessageId,
-      msg_seq: reply.msgSeq,
     };
+    if ((reply.deliveryMode ?? 'passive') === 'passive') {
+      if (!reply.originMessageId) {
+        return { status: 'failed', errorCode: 'MISSING_PASSIVE_MESSAGE_ID' };
+      }
+      payload.msg_id = reply.originMessageId;
+      payload.msg_seq = reply.msgSeq;
+    }
 
     return await this.sendAttempt(url, payload, reply, false);
   }
 
   private async sendAttempt(
     url: string,
-    payload: { content: string; msg_type: number; msg_id: string; msg_seq: number },
+    payload: {
+      content: string;
+      msg_type: number;
+      msg_id?: string;
+      msg_seq?: number;
+    },
     reply: PreparedReply,
     hasRetriedAuth: boolean,
   ): Promise<DeliveryOutcome> {

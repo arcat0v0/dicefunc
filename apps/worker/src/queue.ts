@@ -11,9 +11,10 @@ async function deliverPendingReplies(
   executionId: string,
 ): Promise<boolean> {
   const rows = await env.DB.prepare(`
-    SELECT id, part, msg_seq, scene, target_id, origin_message_id, template_key, variant_id, text, deadline
+    SELECT id, part, msg_seq, scene, target_id, origin_message_id, template_key,
+           variant_id, text, deadline, delivery_mode, condition_part, condition_status, status
     FROM outgoing_messages
-    WHERE bot_id = ?1 AND execution_id = ?2 AND status = 'pending'
+    WHERE bot_id = ?1 AND execution_id = ?2
     ORDER BY part, msg_seq
   `)
     .bind(env.QQ_APP_ID, executionId)
@@ -28,11 +29,57 @@ async function deliverPendingReplies(
       variant_id: string | null;
       text: string | null;
       deadline: string;
+      delivery_mode: 'passive' | 'active';
+      condition_part: number | null;
+      condition_status: 'sent' | 'failed' | null;
+      status: string;
     }>();
 
+  const statusByPart = new Map(rows.results.map((row) => [row.part, row.status]));
   let allTerminal = true;
+
   for (const row of rows.results) {
-    if (!row.scene || !row.target_id || !row.origin_message_id || row.text === null) {
+    if (row.status !== 'pending') {
+      continue;
+    }
+
+    if (row.condition_part !== null && row.condition_status !== null) {
+      const dependencyStatus = statusByPart.get(row.condition_part);
+      if (dependencyStatus === undefined) {
+        await env.DB.prepare(`
+          UPDATE outgoing_messages
+          SET status = 'failed', updated_at = datetime('now')
+          WHERE bot_id = ?1 AND id = ?2 AND status = 'pending'
+        `)
+          .bind(env.QQ_APP_ID, row.id)
+          .run();
+        statusByPart.set(row.part, 'failed');
+        continue;
+      }
+      if (dependencyStatus === 'pending') {
+        allTerminal = false;
+        continue;
+      }
+
+      const conditionMatches =
+        row.condition_status === 'sent'
+          ? dependencyStatus === 'sent'
+          : dependencyStatus === 'failed' || dependencyStatus === 'expired';
+      if (!conditionMatches) {
+        await env.DB.prepare(`
+          UPDATE outgoing_messages
+          SET status = 'skipped', updated_at = datetime('now')
+          WHERE bot_id = ?1 AND id = ?2 AND status = 'pending'
+        `)
+          .bind(env.QQ_APP_ID, row.id)
+          .run();
+        statusByPart.set(row.part, 'skipped');
+        continue;
+      }
+    }
+
+    const passiveMessageIdMissing = row.delivery_mode === 'passive' && !row.origin_message_id;
+    if (!row.scene || !row.target_id || passiveMessageIdMissing || row.text === null) {
       await env.DB.prepare(`
         UPDATE outgoing_messages
         SET status = 'failed', updated_at = datetime('now')
@@ -40,6 +87,7 @@ async function deliverPendingReplies(
       `)
         .bind(env.QQ_APP_ID, row.id)
         .run();
+      statusByPart.set(row.part, 'failed');
       continue;
     }
 
@@ -49,11 +97,12 @@ async function deliverPendingReplies(
       msgSeq: row.msg_seq,
       scene: row.scene as SceneType,
       targetId: row.target_id,
-      originMessageId: row.origin_message_id,
+      originMessageId: row.origin_message_id ?? undefined,
       templateKey: row.template_key ?? '',
       variantId: row.variant_id ?? undefined,
       text: row.text,
       deadline: new Date(row.deadline),
+      deliveryMode: row.delivery_mode,
     });
 
     if (outcome.status === 'sent') {
@@ -64,6 +113,7 @@ async function deliverPendingReplies(
       `)
         .bind(env.QQ_APP_ID, row.id, outcome.platformMessageId)
         .run();
+      statusByPart.set(row.part, 'sent');
     } else if (outcome.status === 'failed' || outcome.status === 'expired') {
       await env.DB.prepare(`
         UPDATE outgoing_messages
@@ -72,10 +122,12 @@ async function deliverPendingReplies(
       `)
         .bind(env.QQ_APP_ID, row.id, outcome.status)
         .run();
+      statusByPart.set(row.part, outcome.status);
     } else {
       allTerminal = false;
     }
   }
+
   return allTerminal;
 }
 
@@ -120,7 +172,8 @@ export async function handleCommandMessage(
     eventId = preloaded.claim.eventId;
   } else {
     const row = await env.DB.prepare(`
-      SELECT id, bot_id, event_id, message_key, conversation_seq, status, payload, config_digest, seed, created_at
+      SELECT id, bot_id, event_id, message_key, conversation_seq, status, payload, config_digest, seed,
+             sender_scene, sender_scope_id, sender_external_id, created_at
       FROM received_events
       WHERE bot_id = ?1 AND event_id = ?2
       LIMIT 1
@@ -136,6 +189,9 @@ export async function handleCommandMessage(
         payload: string | null;
         config_digest: string;
         seed: string | null;
+        sender_scene: SceneType | null;
+        sender_scope_id: string | null;
+        sender_external_id: string | null;
         created_at: string;
       }>();
 
@@ -167,9 +223,9 @@ export async function handleCommandMessage(
       timestamp: new Date(row.created_at),
       text: row.payload ?? '',
       sender: {
-        scene,
-        scopeId: externalId,
-        externalId,
+        scene: row.sender_scene ?? scene,
+        scopeId: row.sender_scope_id ?? externalId,
+        externalId: row.sender_external_id ?? externalId,
       },
     };
 

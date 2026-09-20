@@ -5,6 +5,8 @@ import type {
   CommitOutcome,
   ConversationSession,
   EventClaim,
+  HiddenRollBinding,
+  HiddenRollLinkChallenge,
   JobLease,
   Permissions,
   PolicyEntry,
@@ -59,11 +61,12 @@ export class D1StateStore implements StateStore {
       .prepare(`
       INSERT INTO received_events (
         id, bot_id, event_id, message_key, conversation_seq, status,
-        payload, config_digest, seed, created_at, updated_at
+        payload, config_digest, seed, sender_scene, sender_scope_id, sender_external_id,
+        created_at, updated_at
       ) VALUES (
         ?1, ?2, ?3, ?4,
         COALESCE((SELECT receive_seq FROM conversations WHERE bot_id = ?2 AND scene = ?5 AND external_id = ?6), 1),
-        'pending', ?7, ?8, ?9, datetime('now'), datetime('now')
+        'pending', ?7, ?8, ?9, ?10, ?11, ?12, datetime('now'), datetime('now')
       )
     `)
       .bind(
@@ -76,6 +79,9 @@ export class D1StateStore implements StateStore {
         event.text,
         configDigest,
         seed,
+        event.sender.scene,
+        event.sender.scopeId,
+        event.sender.externalId,
       );
 
     const insertJobStmt = this.db
@@ -159,6 +165,72 @@ export class D1StateStore implements StateStore {
 
       throw new Error(`claimEvent failed for event ${event.eventId}`);
     }
+  }
+
+  async setC2cActiveAuthorization(
+    botId: string,
+    userOpenid: string,
+    enabled: boolean,
+    eventId: string,
+  ): Promise<void> {
+    const authorizationId = `c2c_auth_${botId}_${userOpenid}`;
+    await this.db
+      .prepare(`
+        INSERT INTO c2c_message_authorizations (
+          id, bot_id, user_openid, enabled, version, last_event_id, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, 1, ?5, datetime('now'), datetime('now'))
+        ON CONFLICT(bot_id, user_openid) DO UPDATE SET
+          enabled = excluded.enabled,
+          version = c2c_message_authorizations.version + 1,
+          last_event_id = excluded.last_event_id,
+          updated_at = datetime('now')
+        WHERE c2c_message_authorizations.last_event_id <> excluded.last_event_id
+      `)
+      .bind(authorizationId, botId, userOpenid, enabled ? 1 : 0, eventId)
+      .run();
+  }
+
+  async findHiddenRollLinkChallenge(
+    botId: string,
+    tokenHash: string,
+    now: Date,
+  ): Promise<HiddenRollLinkChallenge | null> {
+    const row = await this.db
+      .prepare(`
+        SELECT c.id, c.c2c_principal_id, c.user_openid, c.version, c.expires_at,
+               COALESCE(a.enabled, 0) AS active_messages_enabled
+        FROM hidden_roll_link_challenges c
+        LEFT JOIN c2c_message_authorizations a
+          ON a.bot_id = c.bot_id AND a.user_openid = c.user_openid
+        WHERE c.bot_id = ?1
+          AND c.token_hash = ?2
+          AND c.consumed_at IS NULL
+          AND julianday(c.expires_at) > julianday(?3)
+        LIMIT 1
+      `)
+      .bind(botId, tokenHash, now.toISOString())
+      .first<{
+        id: string;
+        c2c_principal_id: string;
+        user_openid: string;
+        version: number;
+        expires_at: string;
+        active_messages_enabled: number;
+      }>();
+
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      c2cPrincipalId: row.c2c_principal_id,
+      userOpenid: row.user_openid,
+      version: row.version,
+      expiresAt: parseSqliteUtc(row.expires_at),
+      activeMessagesEnabled: row.active_messages_enabled === 1,
+    };
   }
 
   async loadSnapshot(scope: CommandScope): Promise<StateSnapshot> {
@@ -258,7 +330,15 @@ export class D1StateStore implements StateStore {
       principalId = prinRow.id;
     }
 
-    const [activeLogRes, bindingRes, policyRes, encounterRes, deckRes] = await this.db.batch([
+    const [
+      activeLogRes,
+      bindingRes,
+      policyRes,
+      encounterRes,
+      deckRes,
+      hiddenBindingRes,
+      c2cAuthorizationRes,
+    ] = await this.db.batch([
       this.db
         .prepare(`
         SELECT id, name, status, revision FROM story_logs
@@ -301,7 +381,52 @@ export class D1StateStore implements StateStore {
         WHERE bot_id = ?1 AND conversation_id = ?2
       `)
         .bind(scope.botId, conversationId),
+      this.db
+        .prepare(`
+        SELECT b.id, b.group_scope_id, b.group_principal_id, b.c2c_principal_id,
+               b.user_openid, b.version, COALESCE(a.enabled, 0) AS active_messages_enabled
+        FROM hidden_roll_bindings b
+        LEFT JOIN c2c_message_authorizations a
+          ON a.bot_id = b.bot_id AND a.user_openid = b.user_openid
+        WHERE b.bot_id = ?1 AND b.group_principal_id = ?2 AND b.status = 'active'
+        LIMIT 1
+      `)
+        .bind(scope.botId, principalId),
+      this.db
+        .prepare(`
+        SELECT enabled
+        FROM c2c_message_authorizations
+        WHERE bot_id = ?1 AND user_openid = ?2
+        LIMIT 1
+      `)
+        .bind(scope.botId, scope.principal.externalId),
     ]);
+
+    const hiddenBindingRow = ((hiddenBindingRes?.results?.[0] as unknown) ?? null) as {
+      id: string;
+      group_scope_id: string;
+      group_principal_id: string;
+      c2c_principal_id: string;
+      user_openid: string;
+      version: number;
+      active_messages_enabled: number;
+    } | null;
+    const hiddenRollBinding: HiddenRollBinding | undefined = hiddenBindingRow
+      ? {
+          id: hiddenBindingRow.id,
+          groupScopeId: hiddenBindingRow.group_scope_id,
+          groupPrincipalId: hiddenBindingRow.group_principal_id,
+          c2cPrincipalId: hiddenBindingRow.c2c_principal_id,
+          userOpenid: hiddenBindingRow.user_openid,
+          activeMessagesEnabled: hiddenBindingRow.active_messages_enabled === 1,
+          version: hiddenBindingRow.version,
+        }
+      : undefined;
+    const c2cAuthorizationRow = ((c2cAuthorizationRes?.results?.[0] as unknown) ?? null) as {
+      enabled: number;
+    } | null;
+    const c2cActiveMessagesEnabled =
+      scope.scene === 'c2c' ? c2cAuthorizationRow?.enabled === 1 : undefined;
 
     const activeLogRow = ((activeLogRes?.results?.[0] as unknown) ?? null) as {
       id: string;
@@ -484,6 +609,8 @@ export class D1StateStore implements StateStore {
       conversation,
       ...(characterBinding !== undefined ? { characterBinding } : {}),
       ...(sheet !== undefined ? { sheet } : {}),
+      ...(hiddenRollBinding !== undefined ? { hiddenRollBinding } : {}),
+      ...(c2cActiveMessagesEnabled !== undefined ? { c2cActiveMessagesEnabled } : {}),
       policyEntries,
       permissions,
       ...(activeStoryLog !== undefined ? { activeStoryLog } : {}),
@@ -760,6 +887,110 @@ export class D1StateStore implements StateStore {
               update.newVersion,
             ),
         );
+      } else if (update.type === 'hidden-roll-link-challenge') {
+        statements.push(
+          this.db
+            .prepare(`
+              UPDATE hidden_roll_link_challenges
+              SET consumed_at = COALESCE(consumed_at, datetime('now')),
+                  version = version + CASE WHEN consumed_at IS NULL THEN 1 ELSE 0 END
+              WHERE bot_id = ?1 AND c2c_principal_id = ?2 AND consumed_at IS NULL
+            `)
+            .bind(plan.botId, update.c2cPrincipalId),
+          this.db
+            .prepare(`
+              INSERT INTO hidden_roll_link_challenges (
+                id, bot_id, c2c_principal_id, user_openid, token_hash,
+                expires_at, consumed_at, version, created_at
+              )
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 1, datetime('now'))
+            `)
+            .bind(
+              update.challengeId,
+              plan.botId,
+              update.c2cPrincipalId,
+              update.userOpenid,
+              update.tokenHash,
+              update.expiresAt.toISOString(),
+            ),
+        );
+      } else if (update.type === 'hidden-roll-binding') {
+        statements.push(
+          this.db
+            .prepare(`
+              INSERT INTO commit_guards (
+                bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version
+              )
+              SELECT ?1, ?2, 'hidden_roll_challenge', ?3, ?4,
+                     COALESCE((
+                       SELECT c.version
+                       FROM hidden_roll_link_challenges c
+                       JOIN c2c_message_authorizations a
+                         ON a.bot_id = c.bot_id AND a.user_openid = c.user_openid
+                       WHERE c.bot_id = ?1
+                         AND c.id = ?3
+                         AND c.consumed_at IS NULL
+                         AND julianday(c.expires_at) > julianday('now')
+                         AND a.enabled = 1
+                     ), -1)
+            `)
+            .bind(
+              plan.botId,
+              plan.transactionId,
+              update.challengeId,
+              update.expectedChallengeVersion,
+            ),
+          this.db
+            .prepare(`
+              UPDATE hidden_roll_link_challenges
+              SET consumed_at = datetime('now'), version = version + 1
+              WHERE bot_id = ?1
+                AND id = ?2
+                AND version = ?3
+                AND consumed_at IS NULL
+                AND julianday(expires_at) > julianday('now')
+            `)
+            .bind(plan.botId, update.challengeId, update.expectedChallengeVersion),
+          this.db
+            .prepare(`
+              INSERT INTO hidden_roll_bindings (
+                id, bot_id, group_scope_id, group_principal_id,
+                c2c_principal_id, user_openid, status, version, created_at, updated_at
+              )
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 1, datetime('now'), datetime('now'))
+            `)
+            .bind(
+              update.bindingId,
+              plan.botId,
+              update.groupScopeId,
+              update.groupPrincipalId,
+              update.c2cPrincipalId,
+              update.userOpenid,
+            ),
+        );
+      } else if (update.type === 'hidden-roll-unbind') {
+        statements.push(
+          this.db
+            .prepare(`
+              INSERT INTO commit_guards (
+                bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version
+              )
+              SELECT ?1, ?2, 'hidden_roll_binding', ?3, ?4,
+                     COALESCE((
+                       SELECT version
+                       FROM hidden_roll_bindings
+                       WHERE bot_id = ?1 AND id = ?3 AND status = 'active'
+                     ), -1)
+            `)
+            .bind(plan.botId, plan.transactionId, update.bindingId, update.expectedVersion),
+          this.db
+            .prepare(`
+              UPDATE hidden_roll_bindings
+              SET status = 'revoked', version = ?1, updated_at = datetime('now')
+              WHERE bot_id = ?2 AND id = ?3 AND version = ?4 AND status = 'active'
+            `)
+            .bind(update.newVersion, plan.botId, update.bindingId, update.expectedVersion),
+        );
       }
     }
 
@@ -790,9 +1021,13 @@ export class D1StateStore implements StateStore {
           INSERT INTO outgoing_messages (
             id, bot_id, execution_id, part, msg_seq,
             scene, target_id, origin_message_id, template_key, variant_id, text,
-            deadline, status, created_at, updated_at
+            deadline, delivery_mode, condition_part, condition_status,
+            status, created_at, updated_at
           )
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'pending', datetime('now'), datetime('now'))
+          VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+            'pending', datetime('now'), datetime('now')
+          )
         `)
           .bind(
             messageId,
@@ -802,11 +1037,14 @@ export class D1StateStore implements StateStore {
             reply.msgSeq,
             reply.scene,
             reply.targetId,
-            reply.originMessageId,
+            reply.originMessageId ?? null,
             reply.templateKey,
             reply.variantId ?? null,
             reply.text,
             reply.deadline.toISOString(),
+            reply.deliveryMode ?? 'passive',
+            reply.condition?.part ?? null,
+            reply.condition?.status ?? null,
           ),
       );
     }
@@ -896,6 +1134,12 @@ export class D1StateStore implements StateStore {
           updatedVersions[u.sessionId] = u.newVersion;
         } else if (u.type === 'story-log') {
           updatedVersions[u.logId] = u.newVersion;
+        } else if (u.type === 'hidden-roll-link-challenge') {
+          updatedVersions[u.challengeId] = 1;
+        } else if (u.type === 'hidden-roll-binding') {
+          updatedVersions[u.bindingId] = 1;
+        } else if (u.type === 'hidden-roll-unbind') {
+          updatedVersions[u.bindingId] = u.newVersion;
         }
       }
 

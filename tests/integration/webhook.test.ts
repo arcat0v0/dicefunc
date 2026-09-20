@@ -161,6 +161,73 @@ describe('QQ Webhook handler integration', () => {
     expect(convRow?.scene).toBe('groupAt');
   });
 
+  it('persists active C2C authorization changes without enqueuing commands', async () => {
+    const queue = new RecordingJobQueue();
+    const authorizationBotId = 'bot_c2c_authorization_test';
+    const sendAuthorizationEvent = async (
+      eventId: string,
+      eventType: 'C2C_MSG_RECEIVE' | 'C2C_MSG_REJECT',
+      eventTimestamp: number,
+    ) => {
+      const payload = {
+        op: 0,
+        id: eventId,
+        t: eventType,
+        d: {
+          openid: 'user_c2c_authorized',
+          timestamp: eventTimestamp,
+        },
+      };
+      const rawBody = new TextEncoder().encode(JSON.stringify(payload));
+      const signature = await signPayload(privateKey, String(eventTimestamp), rawBody);
+      return await handleQQWebhook(
+        {
+          rawBody: rawBody.buffer,
+          signature,
+          timestamp: String(eventTimestamp),
+        },
+        {
+          stateStore: store,
+          queue,
+          botId: authorizationBotId,
+          botSecret,
+          configDigest,
+        },
+        logger,
+      );
+    };
+
+    const enabled = await sendAuthorizationEvent(
+      'evt_c2c_authorization_enabled',
+      'C2C_MSG_RECEIVE',
+      1710000001,
+    );
+    expect(enabled.status).toBe(200);
+    await sendAuthorizationEvent('evt_c2c_authorization_enabled', 'C2C_MSG_RECEIVE', 1710000001);
+
+    const enabledRow = await env.DB.prepare(
+      'SELECT enabled, version FROM c2c_message_authorizations WHERE bot_id = ?1 AND user_openid = ?2',
+    )
+      .bind(authorizationBotId, 'user_c2c_authorized')
+      .first<{ enabled: number; version: number }>();
+    expect(enabledRow).toEqual({ enabled: 1, version: 1 });
+
+    const disabled = await sendAuthorizationEvent(
+      'evt_c2c_authorization_disabled',
+      'C2C_MSG_REJECT',
+      1710000002,
+    );
+    expect(disabled.status).toBe(200);
+    expect(queue.enqueued).toHaveLength(0);
+
+    const disabledRow = await env.DB.prepare(
+      'SELECT enabled, version FROM c2c_message_authorizations WHERE bot_id = ?1 AND user_openid = ?2',
+    )
+      .bind(authorizationBotId, 'user_c2c_authorized')
+      .first<{ enabled: number; version: number }>();
+    expect(disabledRow).toEqual({ enabled: 0, version: 2 });
+  });
+
   it('acknowledges while background command execution remains pending', async () => {
     const jobQueue = new RecordingJobQueue();
     const runtimeStore = new D1StateStore(env.DB);

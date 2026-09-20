@@ -112,7 +112,7 @@ export class CommandExecutor {
           lowerCmdName.length > candidate.name.length
         ) {
           const rest = cmdName.slice(candidate.name.length);
-          if (/^[\d+-\w]/.test(rest)) {
+          if (/^[\d+-\w优劣優]/.test(rest)) {
             registered = candidate.cmd;
             cmdName = candidate.name;
             args = [rest, ...parts.slice(1)];

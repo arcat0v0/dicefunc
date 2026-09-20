@@ -107,6 +107,7 @@ export class DefaultEventHandler implements EventHandler {
           budget,
           configVersion: this.configDigest,
           botId: event.botId,
+          hiddenRollLinks: this.stateStore,
         };
 
         const decision = await this.commandExecutor.execute(event, context);
@@ -143,17 +144,21 @@ export class DefaultEventHandler implements EventHandler {
               }
             }
 
+            const deliveryMode = rep.deliveryMode ?? 'passive';
             return {
               executionId,
               part: rep.part > 0 ? rep.part : 1,
               msgSeq: idx + 1,
               scene: rep.scene ?? event.scene,
               targetId: rep.targetId ?? event.externalId,
-              originMessageId: rep.originMessageId ?? event.messageId,
+              originMessageId:
+                deliveryMode === 'passive' ? (rep.originMessageId ?? event.messageId) : undefined,
               templateKey: rep.templateKey,
               variantId,
               text: renderedText,
               deadline,
+              deliveryMode,
+              condition: rep.condition,
             };
           }),
         );
