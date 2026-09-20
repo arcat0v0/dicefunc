@@ -1099,14 +1099,14 @@ export class D1StateStore implements StateStore {
     }
 
     for (const item of plan.logItems) {
-      const itemId = `item_${plan.botId}_${item.sourceId}_${item.seq}`;
+      const itemId = `item_${plan.botId}_${item.sourceId}_${item.seq}_${item.direction}`;
       statements.push(
         this.db
           .prepare(`
           INSERT INTO story_log_items (id, bot_id, log_id, sequence_number, direction, source_id, text, delivery_status, created_at)
           SELECT ?1, ?2, id, ?4, ?5, ?6, ?7, ?8, datetime('now')
           FROM story_logs
-          WHERE bot_id = ?2 AND conversation_id = ?3 AND status IN ('new', 'recording', 'paused')
+          WHERE bot_id = ?2 AND conversation_id = ?3 AND status = 'recording'
           LIMIT 1
         `)
           .bind(

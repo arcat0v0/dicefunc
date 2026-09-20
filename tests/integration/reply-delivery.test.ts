@@ -106,6 +106,62 @@ describe('Queue consumer reply delivery integration', () => {
     expect(msg.ack).toHaveBeenCalled();
   });
 
+  it('continues processing commands after story logging starts', async () => {
+    const botId = 'bot_delivery_story_log';
+    const groupId = 'group_delivery_story_log';
+    const userId = 'user_delivery_story_log';
+    const sent: PreparedReply[] = [];
+    const process = async (suffix: string, text: string): Promise<void> => {
+      const event: VerifiedEvent = {
+        botId,
+        scene: 'groupAt',
+        eventId: `evt_delivery_story_log_${suffix}`,
+        messageId: `msg_delivery_story_log_${suffix}`,
+        externalId: groupId,
+        timestamp: new Date(),
+        text,
+        sender: {
+          scene: 'groupAt',
+          scopeId: groupId,
+          externalId: userId,
+        },
+      };
+      const claim = await store.claimEvent(event, 'digest_delivery');
+      await runQueue(makeMessage(claim.jobId), botId, store, async (reply) => {
+        sent.push(reply);
+        return {
+          status: 'sent',
+          platformMessageId: `plat_msg_story_log_${suffix}`,
+        };
+      });
+    };
+
+    await process('new', '.log new 测试');
+    await process('duplicate_new', '.log new 新日志');
+    await process('roll', '.rd100');
+    await process('off', '.log off');
+
+    expect(sent).toHaveLength(4);
+    expect(sent[0]?.text).toContain('已创建并开启跑团日志「测试」');
+    expect(sent[1]?.text).toContain('当前已有未结束的跑团日志「测试」');
+    expect(sent[2]?.text).toMatch(/d100/);
+    expect(sent[3]?.text).toContain('已暂停记录');
+
+    const logItems = await env.DB.prepare(`
+      SELECT sequence_number, text
+      FROM story_log_items
+      WHERE bot_id = ?1
+      ORDER BY sequence_number
+    `)
+      .bind(botId)
+      .all<{ sequence_number: number; text: string }>();
+    expect(logItems.results).toEqual([
+      { sequence_number: 1, text: '.log new 测试' },
+      { sequence_number: 2, text: '.log new 新日志' },
+      { sequence_number: 3, text: '.rd100' },
+    ]);
+  });
+
   it('binds group and C2C principals before delivering a hidden roll', async () => {
     const botId = 'bot_delivery_hidden_bound';
     const userId = 'user_delivery_hidden_bound';

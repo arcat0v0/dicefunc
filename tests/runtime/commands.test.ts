@@ -608,6 +608,27 @@ describe('Story log command (.log)', () => {
     expect(decision.replies[0]?.text).toContain('已创建并开启跑团日志「密斯卡托尼克之夜」');
   });
 
+  it('explains that an unfinished story log must be closed before creating another', async () => {
+    const ctx = createTestContext(
+      {},
+      {
+        activeStoryLog: {
+          id: 'log_active',
+          name: '旧日志',
+          status: 'recording',
+          version: 1,
+        },
+      },
+    );
+
+    const decision = await executor.execute(createTestEvent('.log new 新日志'), ctx);
+
+    expect(decision.updates).toHaveLength(0);
+    expect(decision.replies[0]?.text).toBe(
+      '当前已有未结束的跑团日志「旧日志」，请先使用 .log end 关闭后再新建。',
+    );
+  });
+
   it('allows normal member without group host permission to create story log', async () => {
     const ctx = createTestContext(
       {},

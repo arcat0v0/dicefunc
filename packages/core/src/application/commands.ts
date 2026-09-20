@@ -1879,6 +1879,27 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
   const sub = args[0]?.toLowerCase();
 
   if (sub === 'new') {
+    if (activeLog && activeLog.status !== 'closed') {
+      return {
+        results: [],
+        updates: [],
+        replies: [
+          {
+            executionId: input.executionId,
+            part: 1,
+            msgSeq: 1,
+            scene: conv.scene,
+            targetId: conv.externalId,
+            originMessageId: input.messageId,
+            templateKey: 'story_log.already_active',
+            text: `当前已有未结束的跑团日志「${activeLog.name}」，请先使用 .log end 关闭后再新建。`,
+            deadline,
+          },
+        ],
+        logItems: [],
+      };
+    }
+
     const logName =
       args.slice(1).join(' ').trim() || `log_${new Date().toISOString().slice(0, 10)}`;
     const logId = `log_${conv.id}_${Date.now()}`;
