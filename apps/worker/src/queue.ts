@@ -171,29 +171,45 @@ export async function handleCommandMessage(
     claim = preloaded.claim;
     eventId = preloaded.claim.eventId;
   } else {
-    const row = await env.DB.prepare(`
-      SELECT id, bot_id, event_id, message_key, conversation_seq, status, payload, config_digest, seed,
-             sender_scene, sender_scope_id, sender_external_id, created_at
-      FROM received_events
-      WHERE bot_id = ?1 AND event_id = ?2
-      LIMIT 1
-    `)
-      .bind(env.QQ_APP_ID, lease.job.resourceId)
-      .first<{
-        id: string;
-        bot_id: string;
-        event_id: string;
-        message_key: string;
-        conversation_seq: number;
-        status: string;
-        payload: string | null;
-        config_digest: string;
-        seed: string | null;
-        sender_scene: SceneType | null;
-        sender_scope_id: string | null;
-        sender_external_id: string | null;
-        created_at: string;
-      }>();
+    type ReceivedEventRow = {
+      id: string;
+      bot_id: string;
+      event_id: string;
+      message_key: string;
+      conversation_seq: number;
+      status: string;
+      payload: string | null;
+      config_digest: string;
+      seed: string | null;
+      sender_scene: SceneType | null;
+      sender_scope_id: string | null;
+      sender_external_id: string | null;
+      sender_role?: string | null;
+      created_at: string;
+    };
+
+    let row: ReceivedEventRow | null | undefined;
+    try {
+      row = await env.DB.prepare(`
+        SELECT id, bot_id, event_id, message_key, conversation_seq, status, payload, config_digest, seed,
+               sender_scene, sender_scope_id, sender_external_id, sender_role, created_at
+        FROM received_events
+        WHERE bot_id = ?1 AND event_id = ?2
+        LIMIT 1
+      `)
+        .bind(env.QQ_APP_ID, lease.job.resourceId)
+        .first<ReceivedEventRow>();
+    } catch {
+      row = await env.DB.prepare(`
+        SELECT id, bot_id, event_id, message_key, conversation_seq, status, payload, config_digest, seed,
+               sender_scene, sender_scope_id, sender_external_id, created_at
+        FROM received_events
+        WHERE bot_id = ?1 AND event_id = ?2
+        LIMIT 1
+      `)
+        .bind(env.QQ_APP_ID, lease.job.resourceId)
+        .first<ReceivedEventRow>();
+    }
 
     if (!row) {
       await deps.stateStore.completeJob(
@@ -226,6 +242,7 @@ export async function handleCommandMessage(
         scene: row.sender_scene ?? scene,
         scopeId: row.sender_scope_id ?? externalId,
         externalId: row.sender_external_id ?? externalId,
+        ...(row.sender_role ? { role: row.sender_role } : {}),
       },
     };
 

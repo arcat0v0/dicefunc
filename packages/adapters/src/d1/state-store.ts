@@ -57,7 +57,35 @@ export class D1StateStore implements StateStore {
     `)
       .bind(conversationId, event.botId, event.scene, event.externalId);
 
-    const insertEventStmt = this.db
+    const insertEventWithRoleStmt = this.db
+      .prepare(`
+      INSERT INTO received_events (
+        id, bot_id, event_id, message_key, conversation_seq, status,
+        payload, config_digest, seed, sender_scene, sender_scope_id, sender_external_id, sender_role,
+        created_at, updated_at
+      ) VALUES (
+        ?1, ?2, ?3, ?4,
+        COALESCE((SELECT receive_seq FROM conversations WHERE bot_id = ?2 AND scene = ?5 AND external_id = ?6), 1),
+        'pending', ?7, ?8, ?9, ?10, ?11, ?12, ?13, datetime('now'), datetime('now')
+      )
+    `)
+      .bind(
+        receivedEventId,
+        event.botId,
+        event.eventId,
+        messageKey,
+        event.scene,
+        event.externalId,
+        event.text,
+        configDigest,
+        seed,
+        event.sender.scene,
+        event.sender.scopeId,
+        event.sender.externalId,
+        event.sender.role ?? null,
+      );
+
+    const insertEventWithoutRoleStmt = this.db
       .prepare(`
       INSERT INTO received_events (
         id, bot_id, event_id, message_key, conversation_seq, status,
@@ -83,7 +111,6 @@ export class D1StateStore implements StateStore {
         event.sender.scopeId,
         event.sender.externalId,
       );
-
     const insertJobStmt = this.db
       .prepare(`
       INSERT INTO jobs (
@@ -96,12 +123,26 @@ export class D1StateStore implements StateStore {
     `)
       .bind(jobId, event.botId, event.eventId);
 
+    let batchRes: D1Result<unknown>[];
     try {
-      const batchRes = await this.db.batch([
-        upsertConversationStmt,
-        insertEventStmt,
-        insertJobStmt,
-      ]);
+      try {
+        batchRes = await this.db.batch([
+          upsertConversationStmt,
+          insertEventWithRoleStmt,
+          insertJobStmt,
+        ]);
+      } catch (insertErr) {
+        const errMsg = insertErr instanceof Error ? insertErr.message : String(insertErr);
+        if (errMsg.includes('sender_role') || errMsg.includes('no such column')) {
+          batchRes = await this.db.batch([
+            upsertConversationStmt,
+            insertEventWithoutRoleStmt,
+            insertJobStmt,
+          ]);
+        } else {
+          throw insertErr;
+        }
+      }
       const firstRes = batchRes[0];
       let conversationSeq = 1;
       if (
@@ -597,9 +638,20 @@ export class D1StateStore implements StateStore {
       }
     }
 
+    const normalizedRole = scope.principal.role?.trim().toLowerCase();
+    const isDiceMaster = normalizedRole === 'master' || normalizedRole === 'dicemaster';
+    const isGroupHost =
+      isDiceMaster ||
+      scope.scene === 'c2c' ||
+      normalizedRole === 'owner' ||
+      normalizedRole === 'admin' ||
+      normalizedRole === 'creator' ||
+      normalizedRole === '群主' ||
+      normalizedRole === '管理员';
+
     const permissions: Permissions = {
-      isDiceMaster: false,
-      isGroupHost: false,
+      isDiceMaster,
+      isGroupHost,
       isTrusted,
       denied,
     };

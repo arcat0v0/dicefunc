@@ -55,12 +55,7 @@ function createTestContext(
     snapshot,
     random: createWebCryptoRandomSource(),
     clock: systemClock,
-    permissions: {
-      isGroupHost: true,
-      isDiceMaster: true,
-      denied: false,
-      trusted: true,
-    },
+    permissions: snapshot.permissions,
     budget: {
       maxDiceRolls: 100,
       maxRecursionDepth: 10,
@@ -201,6 +196,28 @@ describe('Conversation settings updates with set and bot commands', () => {
       expect(updateOn.changes.enabled).toBe(true);
       expect(updateOn.newVersion).toBe(ctx.snapshot.conversation.version + 1);
     }
+  });
+
+  it('rejects .bot and .set when user lacks groupHost permission', async () => {
+    const nonHostCtx = createTestContext(
+      {},
+      {
+        permissions: {
+          isGroupHost: false,
+          isDiceMaster: false,
+          denied: false,
+          isTrusted: false,
+        },
+      },
+    );
+
+    const botDecision = await executor.execute(createTestEvent('.bot off'), nonHostCtx);
+    expect(botDecision.updates).toHaveLength(0);
+    expect(botDecision.replies[0]?.text).toBe('This command requires Group Host permission.');
+
+    const setDecision = await executor.execute(createTestEvent('.set sides 20'), nonHostCtx);
+    expect(setDecision.updates).toHaveLength(0);
+    expect(setDecision.replies[0]?.text).toBe('This command requires Group Host permission.');
   });
 });
 
@@ -589,6 +606,25 @@ describe('Story log command (.log)', () => {
       expect(logUpdate.changes.status).toBe('recording');
     }
     expect(decision.replies[0]?.text).toContain('已创建并开启跑团日志「密斯卡托尼克之夜」');
+  });
+
+  it('allows normal member without group host permission to create story log', async () => {
+    const ctx = createTestContext(
+      {},
+      {
+        permissions: {
+          isGroupHost: false,
+          isDiceMaster: false,
+          denied: false,
+          isTrusted: false,
+        },
+      },
+    );
+    const decision = await executor.execute(createTestEvent('.log new 测试'), ctx);
+
+    expect(decision.updates).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('已创建并开启跑团日志「测试」');
+    expect(decision.replies[0]?.text).not.toContain('Group Host');
   });
 
   it('pauses active story log on .log pause', async () => {

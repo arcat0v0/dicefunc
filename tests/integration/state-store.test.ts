@@ -168,4 +168,57 @@ describe('D1StateStore integration', () => {
     expect(convRow?.dice_sides).toBe(20);
     expect(convRow?.version).toBe(2);
   });
+
+  it('resolves isGroupHost correctly based on principal role and scene', async () => {
+    const ownerSnapshot = await store.loadSnapshot({
+      botId: 'bot_perm_test',
+      scene: 'groupAt',
+      externalId: 'group_perm_1',
+      principal: {
+        scene: 'groupAt',
+        scopeId: 'group_perm_1',
+        externalId: 'user_owner',
+        role: 'owner',
+      },
+    });
+    expect(ownerSnapshot.permissions.isGroupHost).toBe(true);
+
+    const adminSnapshot = await store.loadSnapshot({
+      botId: 'bot_perm_test',
+      scene: 'groupAt',
+      externalId: 'group_perm_1',
+      principal: {
+        scene: 'groupAt',
+        scopeId: 'group_perm_1',
+        externalId: 'user_admin',
+        role: 'admin',
+      },
+    });
+    expect(adminSnapshot.permissions.isGroupHost).toBe(true);
+
+    const memberSnapshot = await store.loadSnapshot({
+      botId: 'bot_perm_test',
+      scene: 'groupAt',
+      externalId: 'group_perm_1',
+      principal: {
+        scene: 'groupAt',
+        scopeId: 'group_perm_1',
+        externalId: 'user_member',
+        role: 'member',
+      },
+    });
+    expect(memberSnapshot.permissions.isGroupHost).toBe(false);
+
+    const c2cSnapshot = await store.loadSnapshot({
+      botId: 'bot_perm_test',
+      scene: 'c2c',
+      externalId: 'user_c2c',
+      principal: {
+        scene: 'c2c',
+        scopeId: 'user_c2c',
+        externalId: 'user_c2c',
+      },
+    });
+    expect(c2cSnapshot.permissions.isGroupHost).toBe(true);
+  });
 });

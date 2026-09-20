@@ -4697,7 +4697,7 @@ export function createDefaultCommandRegistry(): CommandRegistry {
     {
       name: 'log',
       aliases: [],
-      permission: 'groupHost',
+      permission: 'all',
       allowedWhenDisabled: false,
       description: 'Manage story logging sessions',
     },

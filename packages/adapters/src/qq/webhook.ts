@@ -221,7 +221,16 @@ export async function handleQQWebhook(
       return { status: 200, body: { ret: 0 } };
     }
     const author = (d.author ?? {}) as Record<string, unknown>;
-
+    const member = (d.member ?? {}) as Record<string, unknown>;
+    const rawRole =
+      (typeof author.member_role === 'string' && author.member_role.trim()) ||
+      (typeof author.role === 'string' && author.role.trim()) ||
+      (typeof member.role === 'string' && member.role.trim()) ||
+      (Array.isArray(member.roles) &&
+        typeof member.roles[0] === 'string' &&
+        member.roles[0].trim()) ||
+      (typeof d.member_role === 'string' && d.member_role.trim()) ||
+      undefined;
     const eventId =
       typeof payload.id === 'string' ? payload.id : typeof d.id === 'string' ? d.id : '';
 
@@ -273,6 +282,7 @@ export async function handleQQWebhook(
             : typeof author.name === 'string' && author.name.trim()
               ? author.name.trim()
               : undefined,
+        ...(rawRole ? { role: rawRole } : {}),
       },
     };
     const claim = await deps.stateStore.claimEvent(verifiedEvent, deps.configDigest);

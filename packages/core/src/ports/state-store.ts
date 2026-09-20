@@ -10,6 +10,7 @@ export interface Principal {
   readonly scopeId: string;
   readonly externalId: string;
   readonly name?: string | undefined;
+  readonly role?: string | undefined;
 }
 
 export interface VerifiedEvent {

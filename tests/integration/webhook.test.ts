@@ -161,6 +161,54 @@ describe('QQ Webhook handler integration', () => {
     expect(convRow?.scene).toBe('groupAt');
   });
 
+  it('extracts author member_role and attaches to sender.role on GROUP_AT_MESSAGE_CREATE', async () => {
+    const queue = new RecordingJobQueue();
+    const timestamp = '1710000010';
+    const payloadObj = {
+      op: 0,
+      id: 'evt_group_role_1',
+      t: 'GROUP_AT_MESSAGE_CREATE',
+      d: {
+        id: 'msg_group_role_1',
+        group_openid: 'group_test_openid_role',
+        content: '.bot off',
+        author: {
+          member_openid: 'member_owner_openid',
+          member_role: 'owner',
+          username: 'GroupOwner',
+        },
+      },
+    };
+    const bodyBytes = new TextEncoder().encode(JSON.stringify(payloadObj));
+    const signature = await signPayload(privateKey, timestamp, bodyBytes);
+
+    const result = await handleQQWebhook(
+      {
+        rawBody: bodyBytes.buffer,
+        signature,
+        timestamp,
+      },
+      {
+        stateStore: store,
+        queue,
+        botId,
+        botSecret,
+        configDigest,
+      },
+      logger,
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.preloaded?.verifiedEvent.sender.role).toBe('owner');
+
+    const eventRow = await env.DB.prepare(
+      'SELECT sender_role FROM received_events WHERE bot_id = ?1 AND event_id = ?2',
+    )
+      .bind(botId, 'evt_group_role_1')
+      .first<{ sender_role: string | null }>();
+    expect(eventRow?.sender_role).toBe('owner');
+  });
+
   it('persists active C2C authorization changes without enqueuing commands', async () => {
     const queue = new RecordingJobQueue();
     const authorizationBotId = 'bot_c2c_authorization_test';
