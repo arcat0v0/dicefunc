@@ -87,19 +87,9 @@ export function createClassicTemplates(): TemplateRegistry {
     'dice.roll': {
       variants: [
         {
-          id: 'standard',
-          weight: 3,
-          text: '{{actor.name}} 掷骰: {{expression}} = {{total}}',
-        },
-        {
-          id: 'detail',
-          weight: 2,
-          text: '{{actor.name}} 掷骰: {{expression}} = [{{individualRolls}}] = {{total}}',
-        },
-        {
-          id: 'brief',
+          id: 'detailed',
           weight: 1,
-          text: '{{actor.name}} 掷骰: {{total}} ({{expression}})',
+          text: '{{actor.name}} 掷骰: {{detail}}',
         },
       ],
     },

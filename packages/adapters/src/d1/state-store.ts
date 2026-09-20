@@ -14,6 +14,7 @@ import type {
   StateSnapshot,
   StateStore,
   StoredJob,
+  StoryLogSnapshot,
   VerifiedEvent,
 } from '@dicefunc/core';
 import { createConversationSession } from '@dicefunc/core';
@@ -61,12 +62,12 @@ export class D1StateStore implements StateStore {
       .prepare(`
       INSERT INTO received_events (
         id, bot_id, event_id, message_key, conversation_seq, status,
-        payload, config_digest, seed, sender_scene, sender_scope_id, sender_external_id, sender_role,
-        created_at, updated_at
+        payload, config_digest, seed, sender_scene, sender_scope_id, sender_external_id,
+        sender_role, sender_name, event_timestamp, created_at, updated_at
       ) VALUES (
         ?1, ?2, ?3, ?4,
         COALESCE((SELECT receive_seq FROM conversations WHERE bot_id = ?2 AND scene = ?5 AND external_id = ?6), 1),
-        'pending', ?7, ?8, ?9, ?10, ?11, ?12, ?13, datetime('now'), datetime('now')
+        'pending', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, datetime('now'), datetime('now')
       )
     `)
       .bind(
@@ -83,6 +84,8 @@ export class D1StateStore implements StateStore {
         event.sender.scopeId,
         event.sender.externalId,
         event.sender.role ?? null,
+        event.sender.name ?? null,
+        event.timestamp.toISOString(),
       );
 
     const insertEventWithoutRoleStmt = this.db
@@ -373,6 +376,7 @@ export class D1StateStore implements StateStore {
 
     const [
       activeLogRes,
+      latestLogRes,
       bindingRes,
       policyRes,
       encounterRes,
@@ -385,6 +389,18 @@ export class D1StateStore implements StateStore {
         SELECT id, name, status, revision FROM story_logs
         WHERE bot_id = ?1 AND conversation_id = ?2 AND status IN ('new', 'recording', 'paused')
         ORDER BY created_at DESC
+        LIMIT 1
+      `)
+        .bind(scope.botId, conversationId),
+      this.db
+        .prepare(`
+        SELECT l.id, l.name, l.status, l.revision,
+               a.id AS archive_id, a.status AS archive_status
+        FROM story_logs l
+        LEFT JOIN log_archives a
+          ON a.bot_id = l.bot_id AND a.log_id = l.id
+        WHERE l.bot_id = ?1 AND l.conversation_id = ?2
+        ORDER BY l.created_at DESC, a.created_at DESC
         LIMIT 1
       `)
         .bind(scope.botId, conversationId),
@@ -475,14 +491,7 @@ export class D1StateStore implements StateStore {
       status: 'new' | 'recording' | 'paused' | 'closed';
       revision: number;
     } | null;
-    let activeStoryLog:
-      | {
-          readonly id: string;
-          readonly name: string;
-          readonly status: 'new' | 'recording' | 'paused' | 'closed';
-          readonly version: number;
-        }
-      | undefined;
+    let activeStoryLog: StoryLogSnapshot | undefined;
     if (activeLogRow) {
       conversation = { ...conversation, activeLogId: activeLogRow.id };
       activeStoryLog = {
@@ -492,6 +501,39 @@ export class D1StateStore implements StateStore {
         version: activeLogRow.revision,
       };
     }
+
+    const latestLogRow = ((latestLogRes?.results?.[0] as unknown) ?? null) as {
+      id: string;
+      name: string;
+      status: 'new' | 'recording' | 'paused' | 'closed';
+      revision: number;
+      archive_id: string | null;
+      archive_status:
+        | 'pending'
+        | 'uploading'
+        | 'verified'
+        | 'ready'
+        | 'failed'
+        | 'deleting'
+        | 'deleted'
+        | null;
+    } | null;
+    const latestStoryLog: StoryLogSnapshot | undefined = latestLogRow
+      ? {
+          id: latestLogRow.id,
+          name: latestLogRow.name,
+          status: latestLogRow.status,
+          version: latestLogRow.revision,
+          ...(latestLogRow.archive_id && latestLogRow.archive_status
+            ? {
+                archive: {
+                  id: latestLogRow.archive_id,
+                  status: latestLogRow.archive_status,
+                },
+              }
+            : {}),
+        }
+      : undefined;
 
     const encounterRow = ((encounterRes?.results?.[0] as unknown) ?? null) as {
       id: string;
@@ -666,6 +708,7 @@ export class D1StateStore implements StateStore {
       policyEntries,
       permissions,
       ...(activeStoryLog !== undefined ? { activeStoryLog } : {}),
+      ...(latestStoryLog !== undefined ? { latestStoryLog } : {}),
       ...(encounter !== undefined ? { encounter } : {}),
       deckSessions,
     };
@@ -898,6 +941,10 @@ export class D1StateStore implements StateStore {
               status = excluded.status,
               name = COALESCE(?4, story_logs.name),
               revision = excluded.revision,
+              closed_at = CASE
+                WHEN excluded.status = 'closed' THEN COALESCE(story_logs.closed_at, datetime('now'))
+                ELSE story_logs.closed_at
+              END,
               updated_at = datetime('now')
           `)
             .bind(
@@ -908,6 +955,80 @@ export class D1StateStore implements StateStore {
               update.changes.status,
               update.newVersion,
             ),
+        );
+      } else if (update.type === 'story-log-archive') {
+        const manifestKey = `archives/${update.archiveId}.manifest.json`;
+        const pendingLogCursor = plan.logItems
+          .filter((item) => item.logId === update.logId)
+          .reduce((cursor, item) => Math.max(cursor, item.seq), 0);
+        statements.push(
+          this.db
+            .prepare(`
+              INSERT INTO log_archives (
+                id, bot_id, log_id, snapshot_cursor, format, object_key,
+                digest, status, deletion_status, created_at, updated_at
+              )
+              VALUES (
+                ?1, ?2, ?3,
+                MAX(
+                  COALESCE((
+                    SELECT MAX(sequence_number)
+                    FROM story_log_items
+                    WHERE bot_id = ?2 AND log_id = ?3
+                  ), 0),
+                  ?5
+                ),
+                'txt', ?4, '', 'pending', 'none', datetime('now'), datetime('now')
+              )
+              ON CONFLICT(bot_id, id) DO NOTHING
+            `)
+            .bind(update.archiveId, plan.botId, update.logId, manifestKey, pendingLogCursor),
+          this.db
+            .prepare(`
+              INSERT INTO jobs (
+                id, bot_id, type, resource_id, status, attempts, max_attempts,
+                next_attempt_at, deadline, fencing_token, created_at, updated_at
+              )
+              VALUES (
+                ?1, ?2, 'archive-chunk', ?3, 'pending', 0, 5,
+                datetime('now'), datetime('now', '+1 day'), '0', datetime('now'), datetime('now')
+              )
+              ON CONFLICT(bot_id, id) DO NOTHING
+            `)
+            .bind(update.jobId, plan.botId, update.archiveId),
+        );
+      } else if (update.type === 'archive-grant') {
+        statements.push(
+          this.db
+            .prepare(`
+              INSERT INTO commit_guards (
+                bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version
+              )
+              SELECT ?1, ?2, 'archive_ready', ?3, 1,
+                     CASE WHEN EXISTS (
+                       SELECT 1
+                       FROM log_archives
+                       WHERE bot_id = ?1 AND id = ?3
+                         AND status = 'ready' AND deletion_status = 'none'
+                     ) THEN 1 ELSE 0 END
+            `)
+            .bind(plan.botId, plan.transactionId, update.archiveId),
+          this.db
+            .prepare(`
+              INSERT INTO archive_grants (
+                token_hash, bot_id, archive_id, scope, expires_at, revoked_at, created_at
+              )
+              VALUES (?1, ?2, ?3, 'archive:read', ?4, NULL, datetime('now'))
+            `)
+            .bind(update.tokenHash, plan.botId, update.archiveId, update.expiresAt.toISOString()),
+          this.db
+            .prepare(`
+              INSERT INTO log_audit_events (
+                id, bot_id, action, resource_id, actor_scope_id, result, created_at
+              )
+              VALUES (?1, ?2, 'archive.grant', ?3, ?4, 'success', datetime('now'))
+            `)
+            .bind(update.auditId, plan.botId, update.archiveId, update.actorScopeId),
         );
       } else if (update.type === 'encounter') {
         if (update.expectedVersion > 0) {
@@ -1071,11 +1192,12 @@ export class D1StateStore implements StateStore {
             id, bot_id, execution_id, part, msg_seq,
             scene, target_id, origin_message_id, template_key, variant_id, text,
             deadline, delivery_mode, condition_part, condition_status,
+            story_log_id, story_log_sequence, story_log_part,
             status, created_at, updated_at
           )
           VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-            'pending', datetime('now'), datetime('now')
+            ?16, ?17, ?18, 'pending', datetime('now'), datetime('now')
           )
         `)
           .bind(
@@ -1094,29 +1216,49 @@ export class D1StateStore implements StateStore {
             reply.deliveryMode ?? 'passive',
             reply.condition?.part ?? null,
             reply.condition?.status ?? null,
+            reply.storyLog?.logId ?? null,
+            reply.storyLog?.sequence ?? null,
+            reply.storyLog?.part ?? null,
           ),
       );
     }
 
     for (const item of plan.logItems) {
-      const itemId = `item_${plan.botId}_${item.sourceId}_${item.seq}_${item.direction}`;
+      const itemId = `item_${plan.botId}_${item.logId}_${item.seq}_${item.part}`;
       statements.push(
         this.db
           .prepare(`
-          INSERT INTO story_log_items (id, bot_id, log_id, sequence_number, direction, source_id, text, delivery_status, created_at)
-          SELECT ?1, ?2, id, ?4, ?5, ?6, ?7, ?8, datetime('now')
+          INSERT INTO story_log_items (
+            id, bot_id, log_id, sequence_number, sequence_part, direction,
+            source_id, nickname, im_user_id, uniform_id, message_time, text,
+            is_dice, command_id, command_info, raw_msg_id, channel,
+            delivery_status, created_at
+          )
+          SELECT
+            ?1, ?2, id, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+            ?13, ?14, ?15, ?16, ?17, ?18, datetime('now')
           FROM story_logs
-          WHERE bot_id = ?2 AND conversation_id = ?3 AND status = 'recording'
+          WHERE bot_id = ?2 AND id = ?3
           LIMIT 1
         `)
           .bind(
             itemId,
             plan.botId,
-            plan.conversationId,
+            item.logId,
             item.seq,
+            item.part,
             item.direction,
             item.sourceId,
+            item.nickname,
+            item.imUserId,
+            item.uniformId,
+            item.time,
             item.text,
+            item.isDice ? 1 : 0,
+            item.commandId,
+            item.commandInfo ? JSON.stringify(item.commandInfo) : null,
+            item.rawMessageId ?? null,
+            item.channel,
             item.deliveryStatus,
           ),
       );

@@ -1,3 +1,7 @@
+import {
+  normalizeAttributeName,
+  parseAttributeAssignments,
+} from '../domain/character/attribute-input.js';
 import { getBuiltinDeck, listBuiltinDecks } from '../domain/deck/builtin-decks.js';
 import {
   type Card,
@@ -67,17 +71,18 @@ import {
   decideDeathSave,
 } from '../domain/rules/dnd5e/death-saves.js';
 import { searchRuleGlossary } from '../domain/rules/glossary.js';
+import { createArchiveAccessToken } from '../domain/story-log/log.js';
 import type { Clock } from '../ports/clock.js';
 import type { RandomSource } from '../ports/random-source.js';
 import type {
   CommandResult,
   HiddenRollLinkReader,
-  InboundLogItem,
   Permissions,
   PreparedReply,
   Principal,
   StateSnapshot,
   StateUpdate,
+  StoryLogItem,
 } from '../ports/state-store.js';
 
 export class CommandConflictError extends Error {
@@ -128,13 +133,14 @@ export interface CommandContext {
   readonly configVersion: string;
   readonly botId: string;
   readonly hiddenRollLinks?: HiddenRollLinkReader | undefined;
+  readonly publicBaseUrl?: string | undefined;
 }
 
 export interface CommandDecision {
   readonly results: CommandResult[];
   readonly updates: StateUpdate[];
   readonly replies: PreparedReply[];
-  readonly logItems: InboundLogItem[];
+  readonly logItems: StoryLogItem[];
 }
 
 export type CommandHandler = (
@@ -325,6 +331,7 @@ async function rollHandler(input: CommandInput, context: CommandContext): Promis
     repeats: repeatResults,
     total: totalVal,
     individualRolls: rollsVal,
+    detail: textLines.join('\n'),
     rolls: firstResult?.rolls ?? [],
     reason: expr.reason ?? '',
   };
@@ -751,8 +758,9 @@ async function helpHandler(input: CommandInput, context: CommandContext): Promis
         '.log new <日志名> - 新建并开启日志\n' +
         '.log on - 恢复记录\n' +
         '.log pause - 暂停记录\n' +
-        '.log end - 关闭日志\n' +
-        '.log stat - 查看当前状态';
+        '.log end - 关闭并归档日志\n' +
+        '.log stat - 查看当前状态\n' +
+        '.log export - 获取归档下载链接';
     } else if (lower === 'draw') {
       text =
         '牌堆命令：\n' +
@@ -1128,7 +1136,11 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
       const filtered = Object.entries(sheet.attributes).filter(([_, v]) => v >= threshold);
       text = `「${sheet.name}」的属性 (≥${threshold})：\n${filtered.length > 0 ? filtered.map(([k, v]) => `${k}: ${v}`).join(', ') : '(无符合条件属性)'}`;
     } else if (requestedAttrs.length > 0) {
-      const items = requestedAttrs.map((k) => `${k}: ${sheet.attributes[k] ?? '未设置'}`);
+      const items = requestedAttrs.map((requestedName) => {
+        const name = normalizeAttributeName(conv.ruleSet, requestedName);
+        const value = sheet.attributes[name] ?? sheet.attributes[requestedName] ?? '未设置';
+        return `${name}: ${value}`;
+      });
       text = `「${sheet.name}」的属性：${items.join(', ')}`;
     } else {
       const entries = Object.entries(sheet.attributes);
@@ -1242,10 +1254,15 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
       };
     }
 
-    const toRemove = args.slice(1);
+    const toRemove = [
+      ...new Set(args.slice(1).map((name) => normalizeAttributeName(conv.ruleSet, name))),
+    ];
+    const removedNames = new Set(toRemove);
     const nextAttrs = { ...sheet.attributes };
-    for (const key of toRemove) {
-      delete nextAttrs[key];
+    for (const storedName of Object.keys(nextAttrs)) {
+      if (removedNames.has(normalizeAttributeName(conv.ruleSet, storedName))) {
+        delete nextAttrs[storedName];
+      }
     }
 
     const update: StateUpdate = {
@@ -1284,56 +1301,55 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
   }
 
   const rawText = args.join(' ');
-  const regex =
-    /([\u4e00-\u9fa5a-zA-Z0-9_]+)\s*([:+=-]?)\s*([+-]?\d*d\d*(?:[a-zA-Z\u4e00-\u9fa5]+\d*)?|-?\d+)/gi;
   const changes: Record<string, number> = {};
-  const changeDescriptions: string[] = [];
-  const currentAttrs = sheet ? { ...sheet.attributes } : {};
-
-  let match: RegExpExecArray | null = regex.exec(rawText);
-  while (match !== null) {
-    const key = match[1];
-    const op = match[2];
-    const valStr = match[3] ?? '0';
-    if (key) {
-      const prev = currentAttrs[key] ?? 0;
-      let val = 0;
-      if (/[dD]/.test(valStr)) {
-        const parsed = parseDiceExpression(valStr);
-        if (parsed.success && parsed.expression) {
-          const evalRes = await evaluateAst(parsed.expression.ast, context.random);
-          val = evalRes.value;
-        }
-      } else {
-        val = Number.parseInt(valStr, 10);
-      }
-      if (!Number.isNaN(val)) {
-        let nextVal = val;
-        if (op === '+') {
-          nextVal = prev + val;
-          changeDescriptions.push(
-            /[dD]/.test(valStr)
-              ? `${key}: ${prev} ➯ ${nextVal} (+${valStr}=${val})`
-              : `${key}: ${nextVal}`,
-          );
-        } else if (op === '-') {
-          nextVal = prev - val;
-          changeDescriptions.push(
-            /[dD]/.test(valStr)
-              ? `${key}: ${prev} ➯ ${nextVal} (-${valStr}=${val})`
-              : `${key}: ${nextVal}`,
-          );
-        } else {
-          nextVal = val;
-          changeDescriptions.push(`${key}: ${nextVal}`);
-        }
-        currentAttrs[key] = nextVal;
-        changes[key] = nextVal;
-      }
+  const modificationDescriptions: string[] = [];
+  const currentAttrs: Record<string, number> = {};
+  for (const [storedName, value] of Object.entries(sheet?.attributes ?? {})) {
+    const name = normalizeAttributeName(conv.ruleSet, storedName);
+    if (name === storedName || currentAttrs[name] === undefined) {
+      currentAttrs[name] = value;
     }
-    match = regex.exec(rawText);
   }
-  if (changeDescriptions.length === 0) {
+
+  for (const assignment of parseAttributeAssignments(rawText)) {
+    const key = normalizeAttributeName(conv.ruleSet, assignment.name);
+    const prev = currentAttrs[key] ?? 0;
+    const valStr = assignment.expression;
+    let val: number;
+    if (/[dD]/.test(valStr)) {
+      const parsed = parseDiceExpression(valStr);
+      if (!parsed.success || !parsed.expression) {
+        continue;
+      }
+      const evalRes = await evaluateAst(parsed.expression.ast, context.random);
+      val = evalRes.value;
+    } else {
+      val = Number.parseInt(valStr, 10);
+    }
+    if (Number.isNaN(val)) {
+      continue;
+    }
+
+    let nextVal = val;
+    if (assignment.operator === '+') {
+      nextVal = prev + val;
+      modificationDescriptions.push(
+        /[dD]/.test(valStr)
+          ? `${key}: ${prev} ➯ ${nextVal} (+${valStr}=${val})`
+          : `${key}: ${nextVal}`,
+      );
+    } else if (assignment.operator === '-') {
+      nextVal = prev - val;
+      modificationDescriptions.push(
+        /[dD]/.test(valStr)
+          ? `${key}: ${prev} ➯ ${nextVal} (-${valStr}=${val})`
+          : `${key}: ${nextVal}`,
+      );
+    }
+    currentAttrs[key] = nextVal;
+    changes[key] = nextVal;
+  }
+  if (Object.keys(changes).length === 0) {
     return {
       results: [],
       updates: [],
@@ -1410,7 +1426,10 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
         targetId: conv.externalId,
         originMessageId: input.messageId,
         templateKey: 'character.attributes.set',
-        text: `「${sheetName}」属性变更：${changeDescriptions.join(', ')}`,
+        text:
+          modificationDescriptions.length > 0
+            ? `「${sheetName}」的属性变化：\n${modificationDescriptions.join('\n')}`
+            : `「${sheetName}」的${conv.ruleSet.toUpperCase()}属性录入完成，本次录入了${Object.keys(changes).length}条数据`,
         deadline,
       },
     ],
@@ -1875,6 +1894,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
   const deadline = new Date(input.timestamp.getTime() + 300_000);
   const conv = context.snapshot.conversation;
   const activeLog = context.snapshot.activeStoryLog;
+  const latestLog = context.snapshot.latestStoryLog ?? activeLog;
   const args = input.args;
   const sub = args[0]?.toLowerCase();
 
@@ -2097,6 +2117,12 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
       },
       newVersion: activeLog.version + 1,
     };
+    const archiveUpdate: StateUpdate = {
+      type: 'story-log-archive',
+      archiveId: `archive_${activeLog.id}`,
+      jobId: `job_archive_${input.eventId}`,
+      logId: activeLog.id,
+    };
 
     return {
       results: [
@@ -2105,6 +2131,208 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
           kind: 'log.end',
           ruleVersion: '1.0.0',
           data: { logId: activeLog.id },
+        },
+      ],
+      updates: [update, archiveUpdate],
+      replies: [
+        {
+          executionId: input.executionId,
+          part: 1,
+          msgSeq: 1,
+          scene: conv.scene,
+          targetId: conv.externalId,
+          originMessageId: input.messageId,
+          templateKey: 'story_log.end',
+          text: `跑团日志「${activeLog.name}」已关闭，正在归档。归档完成后使用 .log export 获取下载链接。`,
+          deadline,
+        },
+      ],
+      logItems: [],
+    };
+  }
+
+  if (sub === 'export') {
+    if (!context.permissions.isGroupHost && !context.permissions.isDiceMaster) {
+      return {
+        results: [],
+        updates: [],
+        replies: [
+          {
+            executionId: input.executionId,
+            part: 1,
+            msgSeq: 1,
+            scene: conv.scene,
+            targetId: conv.externalId,
+            originMessageId: input.messageId,
+            templateKey: 'story_log.export_forbidden',
+            text: '只有群主或骰主可以导出跑团日志。',
+            deadline,
+          },
+        ],
+        logItems: [],
+      };
+    }
+
+    if (!latestLog) {
+      return {
+        results: [],
+        updates: [],
+        replies: [
+          {
+            executionId: input.executionId,
+            part: 1,
+            msgSeq: 1,
+            scene: conv.scene,
+            targetId: conv.externalId,
+            originMessageId: input.messageId,
+            templateKey: 'story_log.not_found',
+            text: '当前群没有可导出的跑团日志。',
+            deadline,
+          },
+        ],
+        logItems: [],
+      };
+    }
+
+    if (latestLog.status !== 'closed') {
+      return {
+        results: [],
+        updates: [],
+        replies: [
+          {
+            executionId: input.executionId,
+            part: 1,
+            msgSeq: 1,
+            scene: conv.scene,
+            targetId: conv.externalId,
+            originMessageId: input.messageId,
+            templateKey: 'story_log.export_active',
+            text: `跑团日志「${latestLog.name}」仍在记录，请先使用 .log end 关闭。`,
+            deadline,
+          },
+        ],
+        logItems: [],
+      };
+    }
+
+    const archive = latestLog.archive;
+    if (!archive) {
+      const archiveUpdate: StateUpdate = {
+        type: 'story-log-archive',
+        archiveId: `archive_${latestLog.id}`,
+        jobId: `job_archive_${input.eventId}`,
+        logId: latestLog.id,
+      };
+      return {
+        results: [
+          {
+            executionId: input.executionId,
+            kind: 'log.archive_requested',
+            ruleVersion: '1.0.0',
+            data: { logId: latestLog.id, archiveId: archiveUpdate.archiveId },
+          },
+        ],
+        updates: [archiveUpdate],
+        replies: [
+          {
+            executionId: input.executionId,
+            part: 1,
+            msgSeq: 1,
+            scene: conv.scene,
+            targetId: conv.externalId,
+            originMessageId: input.messageId,
+            templateKey: 'story_log.export_requested',
+            text: `跑团日志「${latestLog.name}」已提交归档，请稍后再次使用 .log export。`,
+            deadline,
+          },
+        ],
+        logItems: [],
+      };
+    }
+
+    if (archive.status === 'pending' || archive.status === 'uploading') {
+      return {
+        results: [],
+        updates: [],
+        replies: [
+          {
+            executionId: input.executionId,
+            part: 1,
+            msgSeq: 1,
+            scene: conv.scene,
+            targetId: conv.externalId,
+            originMessageId: input.messageId,
+            templateKey: 'story_log.export_pending',
+            text: `跑团日志「${latestLog.name}」正在归档，请稍后再次使用 .log export。`,
+            deadline,
+          },
+        ],
+        logItems: [],
+      };
+    }
+
+    if (archive.status !== 'ready') {
+      return {
+        results: [],
+        updates: [],
+        replies: [
+          {
+            executionId: input.executionId,
+            part: 1,
+            msgSeq: 1,
+            scene: conv.scene,
+            targetId: conv.externalId,
+            originMessageId: input.messageId,
+            templateKey: 'story_log.export_unavailable',
+            text: `跑团日志「${latestLog.name}」归档暂不可用，请联系管理员。`,
+            deadline,
+          },
+        ],
+        logItems: [],
+      };
+    }
+
+    const publicBaseUrl = context.publicBaseUrl?.replace(/\/+$/, '');
+    if (!publicBaseUrl) {
+      return {
+        results: [],
+        updates: [],
+        replies: [
+          {
+            executionId: input.executionId,
+            part: 1,
+            msgSeq: 1,
+            scene: conv.scene,
+            targetId: conv.externalId,
+            originMessageId: input.messageId,
+            templateKey: 'story_log.export_unconfigured',
+            text: '归档已就绪，但下载地址尚未配置，请联系管理员设置 PUBLIC_BASE_URL。',
+            deadline,
+          },
+        ],
+        logItems: [],
+      };
+    }
+
+    const { token, tokenHash } = await createArchiveAccessToken(context.random);
+    const expiresAt = new Date(context.clock.now().getTime() + 900_000);
+    const update: StateUpdate = {
+      type: 'archive-grant',
+      archiveId: archive.id,
+      tokenHash,
+      actorScopeId: context.snapshot.principalId ?? input.sender?.externalId ?? 'unknown',
+      expiresAt,
+      auditId: `audit_archive_grant_${input.eventId}`,
+    };
+    const downloadUrl = `${publicBaseUrl}/archives/${encodeURIComponent(archive.id)}?token=${encodeURIComponent(token)}`;
+
+    return {
+      results: [
+        {
+          executionId: input.executionId,
+          kind: 'log.export',
+          ruleVersion: '1.0.0',
+          data: { logId: latestLog.id, archiveId: archive.id },
         },
       ],
       updates: [update],
@@ -2116,8 +2344,8 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
           scene: conv.scene,
           targetId: conv.externalId,
           originMessageId: input.messageId,
-          templateKey: 'story_log.end',
-          text: `跑团日志「${activeLog.name}」已关闭，等待归档。`,
+          templateKey: 'story_log.export',
+          text: `跑团日志「${latestLog.name}」已归档。下载链接（15 分钟内有效）：\n${downloadUrl}`,
           deadline,
         },
       ],
@@ -2126,7 +2354,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
   }
 
   if (sub === 'stat' || sub === 'status') {
-    if (!activeLog || activeLog.status === 'closed') {
+    if (!latestLog) {
       return {
         results: [],
         updates: [],
@@ -2160,7 +2388,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
           executionId: input.executionId,
           kind: 'log.stat',
           ruleVersion: '1.0.0',
-          data: { log: activeLog },
+          data: { log: latestLog },
         },
       ],
       updates: [],
@@ -2173,7 +2401,12 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'story_log.stat',
-          text: `跑团日志「${activeLog.name}」状态：${statusMap[activeLog.status]} (版本: ${activeLog.version})`,
+          text:
+            latestLog.status === 'closed'
+              ? `跑团日志「${latestLog.name}」状态：已关闭；归档：${
+                  latestLog.archive?.status === 'ready' ? '可下载（使用 .log export）' : '处理中'
+                }`
+              : `跑团日志「${latestLog.name}」状态：${statusMap[latestLog.status]} (版本: ${latestLog.version})`,
           deadline,
         },
       ],
@@ -2193,7 +2426,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
         targetId: conv.externalId,
         originMessageId: input.messageId,
         templateKey: 'story_log.help',
-        text: '跑团日志管理：\n.log new <日志名> - 新建并开启日志\n.log on - 恢复记录\n.log pause - 暂停记录\n.log end - 关闭日志\n.log stat - 查看当前状态',
+        text: '跑团日志管理：\n.log new <日志名> - 新建并开启日志\n.log on - 恢复记录\n.log pause - 暂停记录\n.log end - 关闭并归档日志\n.log stat - 查看当前状态\n.log export - 获取归档下载链接',
         deadline,
       },
     ],

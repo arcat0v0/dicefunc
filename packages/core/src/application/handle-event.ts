@@ -6,9 +6,9 @@ import type {
   CommandScope,
   CommitOutcome,
   EventClaim,
-  InboundLogItem,
   PreparedReply,
   StateStore,
+  StoryLogItem,
   VerifiedEvent,
 } from '../ports/state-store.js';
 import { type CommandBudget, type CommandContext, CommandExecutor } from './execute-command.js';
@@ -39,6 +39,7 @@ export class DefaultEventHandler implements EventHandler {
   private readonly clock: Clock;
   private readonly configDigest: string;
   private readonly templateRenderer: TemplateRenderer;
+  private readonly publicBaseUrl: string | undefined;
 
   constructor(
     stateStore: StateStore,
@@ -46,12 +47,14 @@ export class DefaultEventHandler implements EventHandler {
     clock?: Clock,
     configDigest?: string,
     templateRenderer?: TemplateRenderer,
+    publicBaseUrl?: string,
   ) {
     this.stateStore = stateStore;
     this.commandExecutor = commandExecutor ?? new CommandExecutor();
     this.clock = clock ?? systemClock;
     this.configDigest = configDigest ?? 'v1-default-config';
     this.templateRenderer = templateRenderer ?? new TemplateRenderer(createClassicTemplates());
+    this.publicBaseUrl = publicBaseUrl;
   }
 
   async handle(event: VerifiedEvent): Promise<EventHandleResult> {
@@ -108,9 +111,22 @@ export class DefaultEventHandler implements EventHandler {
           configVersion: this.configDigest,
           botId: event.botId,
           hiddenRollLinks: this.stateStore,
+          ...(this.publicBaseUrl ? { publicBaseUrl: this.publicBaseUrl } : {}),
         };
 
         const decision = await this.commandExecutor.execute(event, context);
+        const actorName =
+          currentSnapshot.sheet?.name ??
+          event.sender.name ??
+          `用户_${event.sender.externalId.slice(-4) || '1'}`;
+        const logUpdate = decision.updates.find((update) => update.type === 'story-log');
+        const outboundLogId = logUpdate
+          ? logUpdate.changes.status === 'recording'
+            ? logUpdate.logId
+            : undefined
+          : currentSnapshot.activeStoryLog?.status === 'recording'
+            ? currentSnapshot.activeStoryLog.id
+            : undefined;
 
         const assembledReplies: PreparedReply[] = await Promise.all(
           decision.replies.map(async (rep, idx) => {
@@ -126,10 +142,7 @@ export class DefaultEventHandler implements EventHandler {
                 ) ?? decision.results[0];
               const templateData = {
                 actor: {
-                  name:
-                    currentSnapshot.sheet?.name ??
-                    event.sender.name ??
-                    `用户_${event.sender.externalId.slice(-4) || '1'}`,
+                  name: actorName,
                 },
                 ...(matchingResult?.data ?? {}),
               };
@@ -159,20 +172,43 @@ export class DefaultEventHandler implements EventHandler {
               deadline,
               deliveryMode,
               condition: rep.condition,
+              ...(outboundLogId
+                ? {
+                    storyLog: {
+                      logId: outboundLogId,
+                      sequence: claim.conversationSeq,
+                      part: idx + 1,
+                    },
+                  }
+                : {}),
             };
           }),
         );
 
-        const logItems: InboundLogItem[] = [
-          {
-            sourceId: event.sender.externalId,
-            seq: claim.conversationSeq,
-            direction: 'inbound',
-            text: event.text,
-            deliveryStatus: 'sent',
-          },
-          ...decision.logItems,
-        ];
+        const activeLog = currentSnapshot.activeStoryLog;
+        const logItems: StoryLogItem[] =
+          activeLog?.status === 'recording'
+            ? [
+                {
+                  logId: activeLog.id,
+                  sourceId: event.sender.externalId,
+                  seq: claim.conversationSeq,
+                  part: 0,
+                  direction: 'inbound',
+                  nickname: actorName,
+                  imUserId: event.sender.externalId,
+                  uniformId: event.sender.externalId,
+                  time: Math.floor(event.timestamp.getTime() / 1000),
+                  text: event.text,
+                  isDice: false,
+                  commandId: 0,
+                  rawMessageId: event.messageId,
+                  channel: '',
+                  deliveryStatus: 'sent',
+                },
+                ...decision.logItems,
+              ]
+            : [...decision.logItems];
 
         const transactionId = `txn_${event.eventId}_${this.clock.now().getTime()}`;
 

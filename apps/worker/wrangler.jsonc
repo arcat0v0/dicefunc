@@ -11,8 +11,16 @@
     }
   },
   "vars": {
-    "ENVIRONMENT": "development"
+    "ENVIRONMENT": "development",
+    "BOT_TIMEZONE": "Asia/Shanghai"
   },
+  "rules": [
+    {
+      "type": "Text",
+      "globs": ["**/*.yaml", "**/*.yaml?raw"],
+      "fallthrough": true
+    }
+  ],
   "triggers": {
     "crons": ["*/2 * * * *"]
   },

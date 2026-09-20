@@ -1,5 +1,10 @@
 schemaVersion: 1
 templates:
+  bot.name:
+    variants:
+      - id: default
+        weight: 1
+        text: Dicefunc
   dice.roll:
     variants:
       - id: standard

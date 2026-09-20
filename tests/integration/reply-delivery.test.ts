@@ -43,8 +43,15 @@ async function runQueue(
     tokenProvider: {
       getAccessToken: async () => 'test_token',
     },
+    jobQueue: {
+      enqueueArchive: async () => undefined,
+    },
   };
-  const envLike = { DB: env.DB, QQ_APP_ID: botId, ENVIRONMENT: 'test' } as unknown as Env;
+  const envLike = {
+    DB: env.DB,
+    QQ_APP_ID: botId,
+    ENVIRONMENT: 'test',
+  } as unknown as Env;
   const batch = { messages: [msg] };
   await queue(batch as never, envLike, {} as never, deps as never);
 }
@@ -106,24 +113,27 @@ describe('Queue consumer reply delivery integration', () => {
     expect(msg.ack).toHaveBeenCalled();
   });
 
-  it('continues processing commands after story logging starts', async () => {
+  it('records both sides of an active story log with SealDice transition semantics', async () => {
     const botId = 'bot_delivery_story_log';
     const groupId = 'group_delivery_story_log';
     const userId = 'user_delivery_story_log';
     const sent: PreparedReply[] = [];
+    let eventNumber = 0;
     const process = async (suffix: string, text: string): Promise<void> => {
+      eventNumber += 1;
       const event: VerifiedEvent = {
         botId,
         scene: 'groupAt',
         eventId: `evt_delivery_story_log_${suffix}`,
         messageId: `msg_delivery_story_log_${suffix}`,
         externalId: groupId,
-        timestamp: new Date(),
+        timestamp: new Date(`2026-09-20T00:00:0${eventNumber}Z`),
         text,
         sender: {
           scene: 'groupAt',
           scopeId: groupId,
           externalId: userId,
+          name: '调查员',
         },
       };
       const claim = await store.claimEvent(event, 'digest_delivery');
@@ -137,28 +147,111 @@ describe('Queue consumer reply delivery integration', () => {
     };
 
     await process('new', '.log new 测试');
-    await process('duplicate_new', '.log new 新日志');
     await process('roll', '.rd100');
     await process('off', '.log off');
+    await process('on', '.log on');
+    await process('end', '.log end');
 
-    expect(sent).toHaveLength(4);
+    expect(sent).toHaveLength(5);
     expect(sent[0]?.text).toContain('已创建并开启跑团日志「测试」');
-    expect(sent[1]?.text).toContain('当前已有未结束的跑团日志「测试」');
-    expect(sent[2]?.text).toMatch(/d100/);
-    expect(sent[3]?.text).toContain('已暂停记录');
+    expect(sent[1]?.text).toMatch(/d100/);
+    expect(sent[2]?.text).toContain('已暂停记录');
+    expect(sent[3]?.text).toContain('已恢复记录');
+    expect(sent[4]?.text).toContain('已关闭，正在归档');
 
     const logItems = await env.DB.prepare(`
-      SELECT sequence_number, text
+      SELECT sequence_number, sequence_part, direction, nickname, im_user_id,
+             uniform_id, is_dice, text, raw_msg_id, delivery_status
       FROM story_log_items
       WHERE bot_id = ?1
-      ORDER BY sequence_number
+      ORDER BY sequence_number, sequence_part
     `)
       .bind(botId)
-      .all<{ sequence_number: number; text: string }>();
+      .all<{
+        sequence_number: number;
+        sequence_part: number;
+        direction: string;
+        nickname: string;
+        im_user_id: string;
+        uniform_id: string;
+        is_dice: number;
+        text: string;
+        raw_msg_id: string;
+        delivery_status: string;
+      }>();
     expect(logItems.results).toEqual([
-      { sequence_number: 1, text: '.log new 测试' },
-      { sequence_number: 2, text: '.log new 新日志' },
-      { sequence_number: 3, text: '.rd100' },
+      {
+        sequence_number: 1,
+        sequence_part: 1,
+        direction: 'outbound',
+        nickname: 'Dicefunc',
+        im_user_id: botId,
+        uniform_id: botId,
+        is_dice: 1,
+        text: sent[0]?.text,
+        raw_msg_id: 'plat_msg_story_log_new',
+        delivery_status: 'sent',
+      },
+      {
+        sequence_number: 2,
+        sequence_part: 0,
+        direction: 'inbound',
+        nickname: '调查员',
+        im_user_id: userId,
+        uniform_id: userId,
+        is_dice: 0,
+        text: '.rd100',
+        raw_msg_id: 'msg_delivery_story_log_roll',
+        delivery_status: 'sent',
+      },
+      {
+        sequence_number: 2,
+        sequence_part: 1,
+        direction: 'outbound',
+        nickname: 'Dicefunc',
+        im_user_id: botId,
+        uniform_id: botId,
+        is_dice: 1,
+        text: sent[1]?.text,
+        raw_msg_id: 'plat_msg_story_log_roll',
+        delivery_status: 'sent',
+      },
+      {
+        sequence_number: 3,
+        sequence_part: 0,
+        direction: 'inbound',
+        nickname: '调查员',
+        im_user_id: userId,
+        uniform_id: userId,
+        is_dice: 0,
+        text: '.log off',
+        raw_msg_id: 'msg_delivery_story_log_off',
+        delivery_status: 'sent',
+      },
+      {
+        sequence_number: 4,
+        sequence_part: 1,
+        direction: 'outbound',
+        nickname: 'Dicefunc',
+        im_user_id: botId,
+        uniform_id: botId,
+        is_dice: 1,
+        text: sent[3]?.text,
+        raw_msg_id: 'plat_msg_story_log_on',
+        delivery_status: 'sent',
+      },
+      {
+        sequence_number: 5,
+        sequence_part: 0,
+        direction: 'inbound',
+        nickname: '调查员',
+        im_user_id: userId,
+        uniform_id: userId,
+        is_dice: 0,
+        text: '.log end',
+        raw_msg_id: 'msg_delivery_story_log_end',
+        delivery_status: 'sent',
+      },
     ]);
   });
 

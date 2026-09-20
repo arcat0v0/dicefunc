@@ -136,7 +136,7 @@ describe('TemplateRenderer', () => {
         externalId: 'user_1',
         name: '张三',
       },
-      text: '.r 1d20',
+      text: '.r 1d100+2d6',
       rawPayload: {},
     };
 
@@ -148,9 +148,6 @@ describe('TemplateRenderer', () => {
     const reply = replies[0];
     expect(reply?.templateKey).toBe('dice.roll');
     expect(reply?.variantId).toBeDefined();
-    expect(reply?.text).toContain('掷骰');
-    expect(reply?.text).not.toContain('=\n[]');
-    expect(reply?.text).not.toContain('= \n[]');
-    expect(reply?.text).not.toContain('[]');
+    expect(reply?.text).toMatch(/掷骰: 1d100\+2d6 = \[\d+\] \+ \[\d+, \d+\] = \d+/);
   });
 });

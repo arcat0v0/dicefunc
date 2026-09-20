@@ -65,7 +65,10 @@ export function createHttpApp(deps: WorkerDependencies): Hono<{ Bindings: Env }>
   app.get('/archives/:id', async (c) => {
     const archiveId = c.req.param('id');
     const authHeader = c.req.header('authorization') ?? c.req.header('Authorization');
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    const headerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const token = headerToken || c.req.query('token')?.trim() || '';
+
+    if (!token) {
       deps.logger.log(
         buildLogEntry({
           level: 'warn',
@@ -79,96 +82,51 @@ export function createHttpApp(deps: WorkerDependencies): Hono<{ Bindings: Env }>
       return c.text('Not Found', 404);
     }
 
-    const token = authHeader.slice(7).trim();
-    if (!token) {
+    const tokenBytes = new TextEncoder().encode(token);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', tokenBytes);
+    const tokenHash = Array.from(new Uint8Array(hashBuffer), (byte) =>
+      byte.toString(16).padStart(2, '0'),
+    ).join('');
+    const grant = await c.env.DB.prepare(`
+      SELECT g.archive_id, g.scope, g.expires_at, g.revoked_at,
+             a.log_id, a.status, a.format, a.deletion_status, a.snapshot_cursor
+      FROM archive_grants g
+      JOIN log_archives a ON a.id = g.archive_id AND a.bot_id = g.bot_id
+      WHERE g.bot_id = ?1 AND g.token_hash = ?2 AND g.archive_id = ?3
+      LIMIT 1
+    `)
+      .bind(c.env.QQ_APP_ID, tokenHash, archiveId)
+      .first<{
+        archive_id: string;
+        scope: string;
+        expires_at: string;
+        revoked_at: string | null;
+        log_id: string;
+        status: string;
+        format: string;
+        deletion_status: string;
+        snapshot_cursor: number;
+      }>();
+
+    const expiresTime = grant ? new Date(grant.expires_at).getTime() : Number.NaN;
+    const authorized =
+      grant !== null &&
+      grant !== undefined &&
+      (!grant.revoked_at || grant.revoked_at.length === 0) &&
+      Number.isFinite(expiresTime) &&
+      expiresTime > Date.now() &&
+      (grant.scope === 'read' || grant.scope === 'archive:read' || grant.scope.includes('read')) &&
+      grant.status === 'ready' &&
+      grant.deletion_status === 'none';
+
+    if (!authorized || !grant) {
       deps.logger.log(
         buildLogEntry({
           level: 'warn',
           event: 'http.archive.unauthorized',
           component: 'http-archive',
           environment: c.env.ENVIRONMENT,
-          outcome: 'empty_token',
-          httpStatus: 404,
-        }),
-      );
-      return c.text('Not Found', 404);
-    }
-
-    const tokenBytes = new TextEncoder().encode(token);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', tokenBytes);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const tokenHash = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-
-    const grant = await c.env.DB.prepare(`
-      SELECT g.token_hash, g.bot_id, g.archive_id, g.scope, g.expires_at, g.revoked_at, a.object_key, a.format
-      FROM archive_grants g
-      LEFT JOIN log_archives a ON a.id = g.archive_id AND a.bot_id = g.bot_id
-      WHERE g.bot_id = ?1 AND g.token_hash = ?2 AND g.archive_id = ?3
-      LIMIT 1
-    `)
-      .bind(c.env.QQ_APP_ID, tokenHash, archiveId)
-      .first<{
-        token_hash: string;
-        bot_id: string;
-        archive_id: string;
-        scope: string;
-        expires_at: string;
-        revoked_at: string | null;
-        object_key: string | null;
-        format: string | null;
-      }>();
-
-    if (!grant) {
-      deps.logger.log(
-        buildLogEntry({
-          level: 'warn',
-          event: 'http.archive.not_found',
-          component: 'http-archive',
-          environment: c.env.ENVIRONMENT,
-          outcome: 'grant_not_found',
-          httpStatus: 404,
-        }),
-      );
-      return c.text('Not Found', 404);
-    }
-
-    if (grant.revoked_at !== null && grant.revoked_at !== '') {
-      deps.logger.log(
-        buildLogEntry({
-          level: 'warn',
-          event: 'http.archive.revoked',
-          component: 'http-archive',
-          environment: c.env.ENVIRONMENT,
-          outcome: 'token_revoked',
-          httpStatus: 404,
-        }),
-      );
-      return c.text('Not Found', 404);
-    }
-
-    const expiresTime = new Date(grant.expires_at).getTime();
-    if (Number.isNaN(expiresTime) || expiresTime <= Date.now()) {
-      deps.logger.log(
-        buildLogEntry({
-          level: 'warn',
-          event: 'http.archive.expired',
-          component: 'http-archive',
-          environment: c.env.ENVIRONMENT,
-          outcome: 'token_expired',
-          httpStatus: 404,
-        }),
-      );
-      return c.text('Not Found', 404);
-    }
-
-    if (grant.scope !== 'read' && grant.scope !== 'archive:read' && !grant.scope.includes('read')) {
-      deps.logger.log(
-        buildLogEntry({
-          level: 'warn',
-          event: 'http.archive.forbidden_scope',
-          component: 'http-archive',
-          environment: c.env.ENVIRONMENT,
-          outcome: 'invalid_scope',
+          outcome: 'invalid_grant',
           httpStatus: 404,
         }),
       );
@@ -178,10 +136,12 @@ export function createHttpApp(deps: WorkerDependencies): Hono<{ Bindings: Env }>
     const auditId = `audit_${crypto.randomUUID()}`;
     try {
       await c.env.DB.prepare(`
-        INSERT INTO log_audit_events (id, bot_id, action, resource_id, actor_scope_id, result, created_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))
+        INSERT INTO log_audit_events (
+          id, bot_id, action, resource_id, actor_scope_id, result, created_at
+        )
+        VALUES (?1, ?2, 'archive.download', ?3, ?4, 'success', datetime('now'))
       `)
-        .bind(auditId, c.env.QQ_APP_ID, 'archive.download', archiveId, grant.scope, 'success')
+        .bind(auditId, c.env.QQ_APP_ID, archiveId, grant.scope)
         .run();
     } catch {
       deps.logger.log(
@@ -198,21 +158,61 @@ export function createHttpApp(deps: WorkerDependencies): Hono<{ Bindings: Env }>
       return c.text('Internal Server Error', 500);
     }
 
-    const objectKey = grant.object_key ?? archiveId;
-    const r2Object = await c.env.STORY_LOG_BUCKET.get(objectKey);
-    if (!r2Object) {
-      deps.logger.log(
-        buildLogEntry({
-          level: 'warn',
-          event: 'http.archive.object_missing',
-          component: 'http-archive',
-          environment: c.env.ENVIRONMENT,
-          outcome: 'r2_not_found',
-          httpStatus: 404,
-        }),
-      );
-      return c.text('Not Found', 404);
+    const chunkResult = await c.env.DB.prepare(`
+      SELECT object_key, sha256, bytes
+      FROM story_chunks
+      WHERE bot_id = ?1 AND log_id = ?2 AND last_seq <= ?3
+      ORDER BY first_seq ASC
+    `)
+      .bind(c.env.QQ_APP_ID, grant.log_id, grant.snapshot_cursor)
+      .all<{ object_key: string; sha256: string; bytes: number }>();
+    const chunks = chunkResult.results ?? [];
+
+    for (const chunk of chunks) {
+      const object = await c.env.STORY_LOG_BUCKET.head(chunk.object_key);
+      if (
+        !object ||
+        object.size !== chunk.bytes ||
+        object.customMetadata?.digest !== chunk.sha256
+      ) {
+        deps.logger.log(
+          buildLogEntry({
+            level: 'error',
+            event: 'http.archive.object_invalid',
+            component: 'http-archive',
+            environment: c.env.ENVIRONMENT,
+            outcome: 'archive_incomplete',
+            errorCode: 'ARCHIVE_OBJECT_INVALID',
+            httpStatus: 409,
+          }),
+        );
+        return c.text('Archive unavailable', 409);
+      }
     }
+
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        try {
+          for (const chunk of chunks) {
+            const object = await c.env.STORY_LOG_BUCKET.get(chunk.object_key);
+            if (!object) {
+              throw new Error('Archive object missing');
+            }
+            const reader = object.body.getReader();
+            while (true) {
+              const part = await reader.read();
+              if (part.done) {
+                break;
+              }
+              controller.enqueue(part.value);
+            }
+          }
+          controller.close();
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+    });
 
     deps.logger.log(
       buildLogEntry({
@@ -227,12 +227,19 @@ export function createHttpApp(deps: WorkerDependencies): Hono<{ Bindings: Env }>
 
     const headers = new Headers();
     headers.set('Cache-Control', 'private, no-store');
-    headers.set('Content-Disposition', 'attachment');
+    const isTextArchive = grant.format === 'txt';
+    headers.set(
+      'Content-Disposition',
+      `attachment; filename="${archiveId}.${isTextArchive ? 'txt' : 'jsonl'}"`,
+    );
     headers.set('X-Content-Type-Options', 'nosniff');
     headers.set('Referrer-Policy', 'no-referrer');
-    headers.set('Content-Type', r2Object.httpMetadata?.contentType ?? 'application/octet-stream');
+    headers.set(
+      'Content-Type',
+      isTextArchive ? 'text/plain; charset=utf-8' : 'application/x-ndjson; charset=utf-8',
+    );
 
-    return new Response(r2Object.body, {
+    return new Response(body, {
       status: 200,
       headers,
     });

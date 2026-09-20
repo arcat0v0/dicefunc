@@ -1,7 +1,6 @@
 schemaVersion: 1
 bot:
   id: investigator
-  displayName: 守秘海豹
 qq:
   appId: "YOUR_QQ_APP_ID"
   appSecretBinding: QQ_APP_SECRET

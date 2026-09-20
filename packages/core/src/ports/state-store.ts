@@ -2,6 +2,7 @@ import type { CharacterSheet } from '../domain/character/sheet.js';
 import type { HiddenRollBinding, HiddenRollLinkChallenge } from '../domain/hidden-roll/binding.js';
 import type { PolicyEntry } from '../domain/policy/policy.js';
 import type { ConversationSession } from '../domain/session/conversation.js';
+import type { ArchiveStatus } from '../domain/story-log/log.js';
 
 export type SceneType = 'groupAt' | 'groupAll' | 'c2c';
 
@@ -91,6 +92,20 @@ export type StateUpdate =
       readonly newVersion: number;
     }
   | {
+      readonly type: 'story-log-archive';
+      readonly archiveId: string;
+      readonly jobId: string;
+      readonly logId: string;
+    }
+  | {
+      readonly type: 'archive-grant';
+      readonly archiveId: string;
+      readonly tokenHash: string;
+      readonly actorScopeId: string;
+      readonly expiresAt: Date;
+      readonly auditId: string;
+    }
+  | {
       readonly type: 'encounter';
       readonly encounterId: string;
       readonly conversationId: string;
@@ -144,6 +159,13 @@ export interface PreparedReply {
   readonly text: string;
   readonly deadline: Date;
   readonly deliveryMode?: 'passive' | 'active' | undefined;
+  readonly storyLog?:
+    | {
+        readonly logId: string;
+        readonly sequence: number;
+        readonly part: number;
+      }
+    | undefined;
   readonly condition?:
     | {
         readonly part: number;
@@ -152,11 +174,22 @@ export interface PreparedReply {
     | undefined;
 }
 
-export interface InboundLogItem {
+export interface StoryLogItem {
+  readonly logId: string;
   readonly sourceId: string;
   readonly seq: number;
+  readonly part: number;
   readonly direction: 'inbound' | 'outbound';
+  readonly nickname: string;
+  readonly imUserId: string;
+  readonly uniformId: string;
+  readonly time: number;
   readonly text: string;
+  readonly isDice: boolean;
+  readonly commandId: number;
+  readonly commandInfo?: Record<string, unknown> | undefined;
+  readonly rawMessageId?: string | undefined;
+  readonly channel: string;
   readonly deliveryStatus: 'pending' | 'sending' | 'sent' | 'unknown' | 'failed' | 'expired';
 }
 
@@ -174,7 +207,7 @@ export interface CommandCommit {
   readonly updates: StateUpdate[];
   readonly results: CommandResult[];
   readonly replies: PreparedReply[];
-  readonly logItems: InboundLogItem[];
+  readonly logItems: StoryLogItem[];
   readonly completeEvent: boolean;
 }
 
@@ -203,6 +236,19 @@ export interface Permissions {
   readonly denied: boolean;
 }
 
+export interface StoryLogSnapshot {
+  readonly id: string;
+  readonly name: string;
+  readonly status: 'new' | 'recording' | 'paused' | 'closed';
+  readonly version: number;
+  readonly archive?:
+    | {
+        readonly id: string;
+        readonly status: ArchiveStatus;
+      }
+    | undefined;
+}
+
 export interface StateSnapshot {
   readonly principalId?: string | undefined;
   readonly conversation: ConversationSession;
@@ -217,14 +263,8 @@ export interface StateSnapshot {
   readonly c2cActiveMessagesEnabled?: boolean | undefined;
   readonly policyEntries: PolicyEntry[];
   readonly permissions: Permissions;
-  readonly activeStoryLog?:
-    | {
-        readonly id: string;
-        readonly name: string;
-        readonly status: 'new' | 'recording' | 'paused' | 'closed';
-        readonly version: number;
-      }
-    | undefined;
+  readonly activeStoryLog?: StoryLogSnapshot | undefined;
+  readonly latestStoryLog?: StoryLogSnapshot | undefined;
   readonly encounter?:
     | {
         readonly id: string;

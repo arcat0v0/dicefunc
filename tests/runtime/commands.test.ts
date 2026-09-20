@@ -502,11 +502,62 @@ describe('Character sheet attributes command (.st)', () => {
     const update = decision.updates[0];
     expect(update?.type).toBe('character-sheet');
     if (update?.type === 'character-sheet') {
-      expect(update.changes.attributes).toEqual({ 力量: 65, HP: 12 });
+      expect(update.changes.attributes).toEqual({ 力量: 65, 生命值: 12 });
       expect(update.newVersion).toBe(2);
     }
-    expect(decision.replies[0]?.text).toContain('力量: 65');
-    expect(decision.replies[0]?.text).toContain('HP: 12');
+    expect(decision.replies[0]?.text).toBe('「哈维」的属性变化：\n生命值: 12');
+  });
+
+  it('parses compact COC7 aliases and summarizes bulk attribute entry', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_1',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '初无',
+      attributes: {},
+    });
+    const ctx = createTestContext({}, { sheet });
+    const decision = await executor.execute(
+      createTestEvent(
+        '.st 力量55str55敏捷55dex55意志75pow75体质55con55外貌90app90教育50知识50edu50体型70siz70智力60灵感60int60san75san值75理智75理智值75幸运68运气68mp15魔法15hp12体力12会计5人类学1估价5考古学1取悦50攀爬30计算机5计算机使用5电脑5信用20信誉20信用评级20克苏鲁1克苏鲁神话1cm1乔装5闪避57汽车20驾驶20汽车驾驶20电气维修10电子学1话术5斗殴25手枪50急救30历史5恐吓15跳跃20中文52母语50法律5图书馆20图书馆使用20聆听52开锁1撬锁1锁匠1机械维修10医学1博物学10自然学10领航40导航40神秘学63重型操作1重型机械1操作重型机械1重型1说服10精神分析1心理学10骑术5妙手10侦查58潜行40生存10游泳20投掷20追踪10驯兽5潜水1爆破1读唇1催眠1炮术1',
+      ),
+      ctx,
+    );
+
+    expect(decision.updates).toHaveLength(1);
+    const update = decision.updates[0];
+    expect(update?.type).toBe('character-sheet');
+    if (update?.type === 'character-sheet') {
+      const attributes = update.changes.attributes;
+      expect(attributes).toMatchObject({
+        力量: 55,
+        敏捷: 55,
+        意志: 75,
+        教育: 50,
+        智力: 60,
+        理智: 75,
+        幸运: 68,
+        魔法值: 15,
+        生命值: 12,
+        信用评级: 20,
+        克苏鲁神话: 1,
+        计算机使用: 5,
+        汽车驾驶: 20,
+        图书馆使用: 20,
+        锁匠: 1,
+        博物学: 10,
+        导航: 40,
+        操作重型机械: 1,
+        动物驯养: 5,
+      });
+      expect(attributes).not.toHaveProperty('str');
+      expect(attributes).not.toHaveProperty('san值');
+      expect(attributes).not.toHaveProperty('电脑');
+      expect(attributes).not.toHaveProperty('重型');
+      expect(decision.replies[0]?.text).toBe(
+        `「初无」的COC7属性录入完成，本次录入了${Object.keys(attributes ?? {}).length}条数据`,
+      );
+    }
   });
 
   it('creates and binds new character when setting attributes on unbound user', async () => {
@@ -710,13 +761,137 @@ describe('Story log command (.log)', () => {
     );
     const decision = await executor.execute(createTestEvent('.log end'), ctx);
 
-    expect(decision.updates).toHaveLength(1);
-    const logUpdate = decision.updates[0];
+    expect(decision.updates).toHaveLength(2);
+    const logUpdate = decision.updates.find((update) => update.type === 'story-log');
     expect(logUpdate?.type).toBe('story-log');
     if (logUpdate?.type === 'story-log') {
       expect(logUpdate.changes.status).toBe('closed');
     }
-    expect(decision.replies[0]?.text).toContain('已关闭');
+    const archiveUpdate = decision.updates.find((update) => update.type === 'story-log-archive');
+    expect(archiveUpdate).toMatchObject({
+      type: 'story-log-archive',
+      archiveId: 'archive_log_1',
+      jobId: 'job_archive_evt_1',
+      logId: 'log_1',
+    });
+    expect(decision.replies[0]?.text).toContain('.log export');
+  });
+
+  it('starts an archive for a previously closed story log', async () => {
+    const ctx = createTestContext(
+      {},
+      {
+        latestStoryLog: {
+          id: 'log_legacy',
+          name: '旧日志',
+          status: 'closed',
+          version: 2,
+        },
+      },
+    );
+
+    const decision = await executor.execute(createTestEvent('.log export'), ctx);
+
+    expect(decision.updates).toEqual([
+      {
+        type: 'story-log-archive',
+        archiveId: 'archive_log_legacy',
+        jobId: 'job_archive_evt_1',
+        logId: 'log_legacy',
+      },
+    ]);
+    expect(decision.replies[0]?.text).toContain('已提交归档');
+    expect(decision.replies[0]?.text).toContain('.log export');
+  });
+  it('reports that a closed story log is still being archived', async () => {
+    const ctx = createTestContext(
+      {},
+      {
+        latestStoryLog: {
+          id: 'log_1',
+          name: '测试日志',
+          status: 'closed',
+          version: 2,
+          archive: {
+            id: 'archive_log_1',
+            status: 'pending',
+          },
+        },
+      },
+    );
+
+    const decision = await executor.execute(createTestEvent('.log export'), ctx);
+
+    expect(decision.updates).toHaveLength(0);
+    expect(decision.replies[0]?.text).toContain('正在归档');
+    expect(decision.replies[0]?.text).toContain('.log export');
+  });
+
+  it('issues a short-lived download link for a ready story log archive', async () => {
+    const ctx = {
+      ...createTestContext(
+        {},
+        {
+          latestStoryLog: {
+            id: 'log_1',
+            name: '测试日志',
+            status: 'closed',
+            version: 2,
+            archive: {
+              id: 'archive_log_1',
+              status: 'ready',
+            },
+          },
+        },
+      ),
+      publicBaseUrl: 'https://worker.test',
+    };
+
+    const decision = await executor.execute(createTestEvent('.log export'), ctx);
+
+    expect(decision.updates).toHaveLength(1);
+    const grantUpdate = decision.updates[0];
+    expect(grantUpdate?.type).toBe('archive-grant');
+    if (grantUpdate?.type === 'archive-grant') {
+      expect(grantUpdate.archiveId).toBe('archive_log_1');
+      expect(grantUpdate.tokenHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(grantUpdate.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    }
+    expect(decision.replies[0]?.text).toMatch(
+      /^跑团日志「测试日志」已归档。下载链接（15 分钟内有效）：\nhttps:\/\/worker\.test\/archives\/archive_log_1\?token=[A-Za-z0-9_-]{43}$/,
+    );
+  });
+
+  it('rejects story log export from a normal member', async () => {
+    const ctx = {
+      ...createTestContext(
+        {},
+        {
+          permissions: {
+            isGroupHost: false,
+            isDiceMaster: false,
+            denied: false,
+            isTrusted: false,
+          },
+          latestStoryLog: {
+            id: 'log_1',
+            name: '测试日志',
+            status: 'closed',
+            version: 2,
+            archive: {
+              id: 'archive_log_1',
+              status: 'ready',
+            },
+          },
+        },
+      ),
+      publicBaseUrl: 'https://worker.test',
+    };
+
+    const decision = await executor.execute(createTestEvent('.log export'), ctx);
+
+    expect(decision.updates).toHaveLength(0);
+    expect(decision.replies[0]?.text).toBe('只有群主或骰主可以导出跑团日志。');
   });
 
   it('reports log status on .log stat', async () => {
@@ -1569,11 +1744,11 @@ describe('Character sheet dice-expression modification and threshold filter (.st
     const update = decision.updates[0];
     expect(update?.type).toBe('character-sheet');
     if (update?.type === 'character-sheet') {
-      const hp = update.changes.attributes?.HP;
+      const hp = update.changes.attributes?.生命值;
       expect(hp).toBeGreaterThanOrEqual(11);
       expect(hp).toBeLessThanOrEqual(14);
     }
-    expect(decision.replies[0]?.text).toContain('HP:');
+    expect(decision.replies[0]?.text).toContain('生命值:');
   });
 });
 

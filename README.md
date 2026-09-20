@@ -37,18 +37,12 @@ dicefunc/
   - 全局 TypeScript 严格编译（`tsc -b`）；
   - Biome 规范校验；
   - 单元测试（Vitest）与基于 `@cloudflare/vitest-pool-workers` 的真实 workerd 虚拟运行时集成测试；
-  - 一键质检入口 `pnpm check`（`tsc -b && biome check . && pnpm dice config check`）。
+  - 一键质检入口 `pnpm check`（`tsc -b && biome check .`）。
 - **核心领域模型**:
   - 掷骰引擎：支持面数解析、加减修饰值，以及 `kl`/`kh`/`dl`/`dh`（保留/丢弃最高/最低骰）；
   - 纯领域抽牌：`DeckSession` 与 `drawFromDeck` 无放回随机抽牌；
   - COC7 检定：`performCocCheck` 规则判定逻辑（常规/困难/极难/大成功/大失败/失败）；
   - 状态模型：会话设置（`ConversationSession`）、角色卡（`CharacterSheet`）、策略限流（`PolicyEntry`/`RateBucket`）与日志状态机（`StoryLog`/`ArchiveChunk`）。
-- **命令行工具 (CLI)**:
-  - `config check`: 校验 YAML 语法、结构对象与根级 `schemaVersion`；
-  - `config build`: 编译打包单文件或全量配置为 JSON，并计算输出 SHA-256 校验摘要；
-  - `config explain`: 依据 内置默认值 → 全局 `bot.yaml` → 群配置文件 三层优先级解析生效设置；
-  - `reply preview`: 解析加载指定风格回复模板，预览全部候选 variants 渲染结果；
-  - `simulate`: 本地真实模拟掷骰命令执行与分词解析。
 - **QQ 开放平台 Webhook 适配**:
   - 按官方协议从 AppSecret 派生 Ed25519 密钥，对 `timestamp + body` 验签（缺失凭据或验签失败直接 401，经官方向量验证）；
   - 平台校验应答：支持 `op: 13` 回调验证（按官方算法签名 `event_ts + plain_token` 应答，官方向量逐字节匹配）；
@@ -60,17 +54,17 @@ dicefunc/
   - 使用 `commit_guards` 表与 `CHECK (actual_version = expected_version)` 约束提供批处理事务乐观并发守卫；
   - 基于 `fencingToken` 的任务租约控制，支持异常任务重试、补投与死信清理。
 - **R2 归档存储**:
-  - `R2ArchiveStore` 提供私有分片写入与读取校验；
-  - `GET /archives/:id` 路由实现下载授权校验、审计记录写入与安全响应头控制。
+  - `.log end` 将冻结的双向日志记录按有界 SealDice 文本分片写入私有 R2，并在全部分片校验后将归档标记为可下载；
+  - `.log export` 为群主或骰主签发 15 分钟下载链接，`GET /archives/:id` 校验授权、记录审计并返回 SealDice TXT 归档。
 - **运行时日志规范 (RuntimeLogger)**:
   - 严格字段白名单机制，过滤所有敏感字段（密钥、token、聊天正文等）；
   - 单条序列化日志严格执行 8 KiB 截断，超限安全截断并标记。
 - **数据库架构**:
-  - `migrations/001_initial_schema.sql` 至 `003_hidden_roll_bindings.sql` 提供基础架构、任务恢复索引与暗骰可信绑定/条件投递状态。
+  - `migrations/001_initial_schema.sql` 至 `006_sealdice_story_log.sql` 提供基础架构、任务恢复索引、暗骰可信绑定及 SealDice 兼容的双向日志记录。
 
 ### 未实现 / 后续规划 (P1-P8)
 
-- **业务命令扩展**: `.st`（角色卡属性）、`.pc`（角色切换）、`.log`（跑团日志管理交互命令）、`.ra`/`.rc` 等检定命令尚未注册至 Core 命令注册表；
+- **业务命令扩展**: `.log halt/delete`、跑团日志聚合统计与角色卡的完整 SealDice 兼容语义尚未实现；
 - **C2C 端到端实测**: 尚待结合真实 QQ 开放平台接口进行端到端闭环验证；
 - **DND5e 完整规则**: 战斗轮、先攻、HP/临时 HP 与法术位管理尚未实现；
 - **牌堆与自定义回复命令**: 领域模型就绪，尚未接入聊天命令处理管线；
@@ -92,6 +86,7 @@ dicefunc/
 - `.set sides <number>` - 修改当前会话默认骰子面数
 - `.bot on` / `.bot off` - 开启或关闭机器人在当前会话中的响应
 - `.userid` / `.uid` / `.id` - 查询当前用户外部 ID 与场景信息
+- `.log new/on/off/end/stat/export` - 记录跑团消息、关闭后异步归档，并由群主或骰主获取 15 分钟下载链接
 
 ## 快速开始
 
@@ -101,24 +96,35 @@ dicefunc/
 pnpm install
 ```
 
-### CLI 配置与模拟工具
+### 自定义机器人回复文案
+
+回复文案位于 `config/flavors/<风格>/replies/*.yaml`：
+
+- `config/flavors/classic/replies/core.yaml`：机器人名称和基础掷骰文案；
+- `config/flavors/classic/replies/coc7.yaml`：COC7 检定文案；
+- `config/flavors/gothic/replies/coc7.yaml`：覆盖 `classic` 的古典怪谈风格文案。
+
+每个模板由一个或多个 `variants` 组成。`id` 用于稳定标识候选文案，`weight` 控制随机选中权重，`text` 支持 `{{actor.name}}` 等结构化模板字段。例如修改机器人在跑团日志中的名称：
+
+```yaml
+schemaVersion: 1
+templates:
+  bot.name:
+    variants:
+      - id: default
+        weight: 1
+        text: Dicefunc
+```
+
+`bot.name` 使用第一个 variant 的 `text`；未配置或内容为空时默认为 `Dicefunc`。修改后执行：
 
 ```bash
-# 检查配置语法与 schemaVersion
-pnpm dice config check --dir ./config
-
-# 编译配置并生成 SHA-256 摘要
-pnpm dice config build --dir ./config
-
-# 解释特定群配置的最终生效值
-pnpm dice config explain --group ./config/groups/example.yaml --key defaults.ruleSet
-
-# 预览回复模板
-pnpm dice reply preview dice.roll --flavor classic
-
-# 本地模拟掷骰命令
-pnpm dice simulate --message ".r 1d100" --scene groupAt
+pnpm check
+pnpm test:runtime
+pnpm deploy:worker
 ```
+
+当前 Worker 会在构建时直接打包并使用 `classic/replies/core.yaml` 中的 `bot.name`，不需要设置名称环境变量。其他 YAML 回复模板尚未接入 Worker 运行时，修改它们不会改变线上回复；当前没有面向用户的回复文案 CLI。
 
 ### 本地开发与测试
 
@@ -199,7 +205,7 @@ npx wrangler d1 migrations apply dicefunc-db --remote -c apps/worker/wrangler.js
 npx wrangler d1 migrations apply dicefunc-db --local -c apps/worker/wrangler.jsonc
 ```
 
-远程命令会列出待执行的迁移并询问，输入 `y` 回车。成功标志：`🌀 Mapping SQL input into an array of statements ... ✅`，且 `001_initial_schema.sql` 至 `003_hidden_roll_bindings.sql` 均已应用。
+远程命令会列出待执行的迁移并询问，输入 `y` 回车。成功标志：`🌀 Mapping SQL input into an array of statements ... ✅`，且 `001_initial_schema.sql` 至 `006_sealdice_story_log.sql` 均已应用。
 
 ### 4. 拿到 QQ 机器人的两份密钥
 
@@ -212,18 +218,19 @@ npx wrangler d1 migrations apply dicefunc-db --local -c apps/worker/wrangler.jso
 
 先保存即可，"校验"按钮留到第 7 步再点。
 
-### 5. 把两份密钥存进 Worker
+### 5. 把密钥和公开下载地址存进 Worker
 
-逐条执行，每条命令会提示 `Enter a secret value:`，**粘贴对应值后回车**（粘贴时屏幕不显示是正常的）：
+逐条执行，每条命令会提示 `Enter a secret value:`，粘贴对应值后回车（粘贴时屏幕不显示是正常的）。`PUBLIC_BASE_URL` 不是密钥，但使用同一部署入口可以避免把部署专属域名提交进仓库：
 
 ```bash
-npx wrangler secret put QQ_APP_ID -c apps/worker/wrangler.jsonc      # 第 4 步的 App ID
-npx wrangler secret put QQ_APP_SECRET -c apps/worker/wrangler.jsonc  # 第 4 步的 App Secret
+npx wrangler secret put QQ_APP_ID -c apps/worker/wrangler.jsonc         # 第 4 步的 App ID
+npx wrangler secret put QQ_APP_SECRET -c apps/worker/wrangler.jsonc     # 第 4 步的 App Secret
+npx wrangler secret put PUBLIC_BASE_URL -c apps/worker/wrangler.jsonc   # 第 2 步复制的 https://...workers.dev
 ```
 
-成功标志：每条都输出 `✅ Success! ...`。密钥写入即时生效，无需重新部署。
+成功标志：每条都输出 `✅ Success! ...`。这些绑定写入即时生效，无需重新部署。
 
-> 本地开发不要执行上面的命令，改为新建 `apps/worker/.dev.vars` 文件，按 `KEY=值` 每行一个写入同名键值（该文件已被 `.gitignore` 排除，不会进仓库）。
+> 本地开发不要执行上面的命令，改为新建 `apps/worker/.dev.vars` 文件，按 `KEY=值` 每行一个写入同名键值（该文件已被 `.gitignore` 排除，不会进仓库）。本地 `PUBLIC_BASE_URL` 通常填写 Wrangler 打印的本地地址。
 
 ### 6. 确认线上服务正常
 
@@ -247,13 +254,17 @@ pnpm check && pnpm test:integration   # 自检
 pnpm deploy:worker                    # 重新部署（资源已存在，秒级完成）
 ```
 
-注意：配置包的运行时发布（KV/R2 versioned，P6）尚未实现；当前规则、模板等 YAML 变更由 CLI 校验，Worker 行为以代码内注册内容为准。
+注意：配置包的运行时发布（KV/R2 versioned，P6）尚未实现。`config/flavors/classic/replies/core.yaml` 中的 `bot.name` 会在 Worker 构建时直接打包；其他规则和回复模板 YAML 尚未接入 Worker 运行时，Worker 行为仍以代码内注册内容为准。
 
 ## 云资源与配置
 
 ### Secrets 与环境变量
 
+机器人在跑团日志中的默认昵称来自 `config/flavors/classic/replies/core.yaml` 的 `bot.name` 文案；当前默认值为 `Dicefunc`，不使用独立环境变量。
+
 - `ENVIRONMENT` - 运行环境（`production` / `staging` / `development`）
+- `PUBLIC_BASE_URL` - Worker 对外 HTTPS 根地址，用于生成 15 分钟有效的跑团日志下载链接
+- `BOT_TIMEZONE` - 跑团日志时间文本使用的 IANA 时区（默认部署配置为 `Asia/Shanghai`）
 - `QQ_APP_ID` - QQ 开放平台应用 ID（同时作为单实例 botId）
 - `QQ_APP_SECRET` - QQ 开放平台应用密钥（OpenAPI access token 获取；同时按官方算法派生 Webhook 验签与 `op=13` 应答签名密钥）
 

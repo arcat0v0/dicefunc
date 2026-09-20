@@ -70,6 +70,7 @@ export function createDependencies(env: Env): WorkerDependencies {
     undefined,
     undefined,
     templateRenderer,
+    env.PUBLIC_BASE_URL,
   );
 
   return {

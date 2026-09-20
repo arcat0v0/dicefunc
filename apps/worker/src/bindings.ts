@@ -10,4 +10,6 @@ export interface Env {
   ARCHIVE_QUEUE: Queue<QueueMessage>;
   QQ_APP_ID: string;
   QQ_APP_SECRET: string;
+  BOT_TIMEZONE?: string;
+  PUBLIC_BASE_URL?: string;
 }

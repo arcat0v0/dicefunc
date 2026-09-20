@@ -1,3 +1,5 @@
+import type { RandomSource } from '../../ports/random-source.js';
+
 export type LogRecordingStatus = 'new' | 'recording' | 'paused' | 'closed';
 
 export type ArchiveStatus =
@@ -8,6 +10,47 @@ export type ArchiveStatus =
   | 'failed'
   | 'deleting'
   | 'deleted';
+
+export interface SealDiceTextLogItem {
+  readonly nickname: string;
+  readonly imUserId: string;
+  readonly time: number;
+  readonly message: string;
+}
+
+export function createSealDiceTextLogFormatter(
+  timeZone: string,
+): (item: SealDiceTextLogItem) => string {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    calendar: 'gregory',
+    numberingSystem: 'latn',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  });
+  return (item) => {
+    let year = '';
+    let month = '';
+    let day = '';
+    let hour = '';
+    let minute = '';
+    let second = '';
+    for (const part of formatter.formatToParts(new Date(item.time * 1000))) {
+      if (part.type === 'year') year = part.value;
+      else if (part.type === 'month') month = part.value;
+      else if (part.type === 'day') day = part.value;
+      else if (part.type === 'hour') hour = part.value;
+      else if (part.type === 'minute') minute = part.value;
+      else if (part.type === 'second') second = part.value;
+    }
+    return `${item.nickname}(${item.imUserId}) ${year}-${month}-${day} ${hour}:${minute}:${second}\n${item.message}\n\n`;
+  };
+}
 
 export interface StoryLog {
   readonly id: string;
@@ -20,6 +63,25 @@ export interface StoryLog {
   readonly cursor: number;
   readonly createdAt: Date;
   readonly updatedAt: Date;
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+export async function createArchiveAccessToken(
+  random: RandomSource,
+): Promise<{ readonly token: string; readonly tokenHash: string }> {
+  const token = bytesToBase64Url(await random.bytes(32));
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+  const tokenHash = Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
+  return { token, tokenHash };
 }
 
 export function createStoryLog(input: {
