@@ -39,8 +39,8 @@ importers:
         specifier: ^4.0.0
         version: 4.13.8
       js-yaml:
-        specifier: ^4.1.0
-        version: 4.3.2
+        specifier: 4.1.0
+        version: 4.1.0
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^5.20260918.1
@@ -71,8 +71,8 @@ importers:
   packages/config:
     dependencies:
       js-yaml:
-        specifier: ^4.1.0
-        version: 4.3.2
+        specifier: 4.1.0
+        version: 4.1.0
       zod:
         specifier: ^3.22.0
         version: 3.25.76
@@ -1308,8 +1308,8 @@ packages:
   itty-time@1.0.6:
     resolution: {integrity: sha512-+P8IZaLLBtFv8hCkIjcymZOp4UJ+xW6bSlQsXGqrkmJh7vSiMFSlNne0mCYagEE0N7HDNR5jJBRxwN0oYv61Rw==}
 
-  js-yaml@4.3.2:
-    resolution: {integrity: sha512-SFNOvSJ+Dgf/9An904Yx+CgSlIPCkIpao4qo51lpee25TIRejdH3rhR4EZMGoNx3/TP3O+wzWuiTFl4sqbltzA==}
+  js-yaml@4.1.0:
+    resolution: {integrity: sha512-wpxZs9NoxZaJESJGIZTyDEaYpl0FKSA+FB9aJiyemKhMwkxQg63h4T1KJgUGHpTqPDNRcmmYLugrRjJlBtWvRA==}
     hasBin: true
 
   kleur@4.1.5:
@@ -2492,7 +2492,7 @@ snapshots:
 
   itty-time@1.0.6: {}
 
-  js-yaml@4.3.2:
+  js-yaml@4.1.0:
     dependencies:
       argparse: 2.0.1
 

@@ -23,6 +23,7 @@ export interface VerifiedEvent {
   readonly timestamp: Date;
   readonly text: string;
   readonly sender: Principal;
+  readonly mentions?: readonly Principal[] | undefined;
 }
 
 export type StateUpdate =
@@ -51,6 +52,12 @@ export type StateUpdate =
       readonly newVersion: number;
     }
   | {
+      readonly type: 'character-sheet-delete';
+      readonly sheetId: string;
+      readonly ownerPrincipal: string;
+      readonly expectedVersion: number;
+    }
+  | {
       readonly type: 'character-binding';
       readonly conversationId: string;
       readonly principalId: string;
@@ -65,10 +72,18 @@ export type StateUpdate =
       readonly entryId: string;
       readonly expectedVersion: number;
       readonly changes: {
+        readonly scope: 'bot' | 'group' | 'user';
+        readonly scopeId: string;
+        readonly principalId?: string | undefined;
         readonly effect: 'deny' | 'trust';
         readonly reason?: string | undefined;
       };
       readonly newVersion: number;
+    }
+  | {
+      readonly type: 'policy-entry-delete';
+      readonly entryId: string;
+      readonly expectedVersion: number;
     }
   | {
       readonly type: 'deck-session';
@@ -90,6 +105,13 @@ export type StateUpdate =
         readonly status: 'new' | 'recording' | 'paused' | 'closed';
       };
       readonly newVersion: number;
+    }
+  | {
+      readonly type: 'story-log-delete';
+      readonly logId: string;
+      readonly expectedVersion: number;
+      readonly newVersion: number;
+      readonly jobId: string;
     }
   | {
       readonly type: 'story-log-archive';
@@ -227,6 +249,7 @@ export interface CommandScope {
   readonly scene: SceneType;
   readonly externalId: string;
   readonly principal: Principal;
+  readonly delegates?: readonly Principal[] | undefined;
 }
 
 export interface Permissions {
@@ -239,8 +262,11 @@ export interface Permissions {
 export interface StoryLogSnapshot {
   readonly id: string;
   readonly name: string;
-  readonly status: 'new' | 'recording' | 'paused' | 'closed';
+  readonly status: 'new' | 'recording' | 'paused' | 'closed' | 'deleting' | 'deleted';
   readonly version: number;
+  readonly itemCount?: number | undefined;
+  readonly rollCount?: number | undefined;
+  readonly createdAt?: Date | undefined;
   readonly archive?:
     | {
         readonly id: string;
@@ -259,12 +285,17 @@ export interface StateSnapshot {
       }
     | undefined;
   readonly sheet?: CharacterSheet | undefined;
+  readonly ownedSheets?: readonly CharacterSheet[] | undefined;
+  readonly delegateSheets?: Readonly<Record<string, CharacterSheet>> | undefined;
+  readonly delegatePrincipals?: readonly Principal[] | undefined;
+  readonly delegatePolicyEntries?: Readonly<Record<string, PolicyEntry>> | undefined;
   readonly hiddenRollBinding?: HiddenRollBinding | undefined;
   readonly c2cActiveMessagesEnabled?: boolean | undefined;
   readonly policyEntries: PolicyEntry[];
   readonly permissions: Permissions;
   readonly activeStoryLog?: StoryLogSnapshot | undefined;
   readonly latestStoryLog?: StoryLogSnapshot | undefined;
+  readonly storyLogs?: readonly StoryLogSnapshot[] | undefined;
   readonly encounter?:
     | {
         readonly id: string;
@@ -302,7 +333,7 @@ export interface CommitOutcome {
 
 export interface StoredJob {
   readonly jobId: string;
-  readonly type: 'command' | 'archive-chunk';
+  readonly type: 'command' | 'archive-chunk' | 'archive-delete';
   readonly resourceId: string;
   readonly status: 'pending' | 'processing' | 'completed' | 'failed' | 'dead';
   readonly attempts: number;
@@ -311,7 +342,6 @@ export interface StoredJob {
   readonly deadline: Date;
   readonly fencingToken: number;
 }
-
 export interface JobLease {
   readonly job: StoredJob;
   readonly leaseToken: string;

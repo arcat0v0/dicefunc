@@ -37,7 +37,7 @@ class SilentLogger implements RuntimeLogger {
   }
 }
 
-function makeMessage(jobId: string, type: 'command' | 'archive-chunk') {
+function makeMessage(jobId: string, type: QueueMessage['type']) {
   return {
     body: { jobId, type, schemaVersion: 1 },
     ack: vi.fn(),
@@ -370,5 +370,112 @@ describe('Story log archive download integration', () => {
       .bind(botId, archiveId)
       .first<{ status: string }>();
     expect(archive?.status).toBe('ready');
+  });
+
+  it('revokes and convergently removes archived story log content', async () => {
+    const botId = 'bot_story_delete';
+    const groupId = 'group_story_delete';
+    const logId = 'log_story_delete';
+    const archiveId = 'archive_story_delete';
+    const jobId = 'job_story_delete';
+    const event: VerifiedEvent = {
+      botId,
+      scene: 'groupAt',
+      eventId: 'evt_story_delete',
+      messageId: 'msg_story_delete',
+      externalId: groupId,
+      timestamp: new Date(),
+      text: '.log del old',
+      sender: {
+        scene: 'groupAt',
+        scopeId: groupId,
+        externalId: 'user_story_delete',
+      },
+    };
+    const claim = await store.claimEvent(event, 'digest_story_delete');
+    const manifestKey = 'archives/story_delete.manifest.json';
+    const chunkKey = 'archives/story_delete.chunk.txt';
+    await env.STORY_LOG_BUCKET.put(manifestKey, 'manifest');
+    await env.STORY_LOG_BUCKET.put(chunkKey, 'content');
+    await env.DB.batch([
+      env.DB.prepare(`
+          INSERT INTO story_logs (
+            id, bot_id, conversation_id, name, status, revision, cursor
+          ) VALUES (?1, ?2, ?3, 'old', 'deleting', 5, 1)
+        `).bind(logId, botId, claim.conversationId),
+      env.DB.prepare(`
+          INSERT INTO story_log_items (
+            id, bot_id, log_id, sequence_number, sequence_part, direction,
+            source_id, text, delivery_status
+          ) VALUES (
+            'item_story_delete', ?1, ?2, 1, 0, 'inbound',
+            'source_story_delete', 'private text', 'sent'
+          )
+        `).bind(botId, logId),
+      env.DB.prepare(`
+          INSERT INTO story_chunks (
+            id, bot_id, log_id, first_seq, last_seq, object_key, sha256, bytes, item_count
+          ) VALUES (
+            'chunk_story_delete', ?1, ?2, 1, 1, ?3, 'digest', 7, 1
+          )
+        `).bind(botId, logId, chunkKey),
+      env.DB.prepare(`
+          INSERT INTO log_archives (
+            id, bot_id, log_id, snapshot_cursor, format, object_key,
+            digest, status, deletion_status
+          ) VALUES (?1, ?2, ?3, 1, 'txt', ?4, 'digest', 'ready', 'deleting')
+        `).bind(archiveId, botId, logId, manifestKey),
+      env.DB.prepare(`
+          INSERT INTO jobs (
+            id, bot_id, type, resource_id, status, attempts, max_attempts,
+            next_attempt_at, deadline, fencing_token
+          ) VALUES (
+            ?1, ?2, 'archive-delete', ?3, 'pending', 0, 5,
+            datetime('now'), datetime('now', '+1 day'), '0'
+          )
+        `).bind(jobId, botId, logId),
+    ]);
+
+    const dependencies = {
+      stateStore: store,
+      jobQueue: new RecordingJobQueue(),
+      archiveStore: new R2ArchiveStore(env.STORY_LOG_BUCKET),
+      logger: new SilentLogger(),
+    } as unknown as WorkerDependencies;
+    const workerEnv = {
+      DB: env.DB,
+      STORY_LOG_BUCKET: env.STORY_LOG_BUCKET,
+      QQ_APP_ID: botId,
+      ENVIRONMENT: 'test',
+    } as unknown as Env;
+    const message = makeMessage(jobId, 'archive-delete');
+    await queue({ messages: [message] } as never, workerEnv, {} as never, dependencies);
+
+    expect(message.ack).toHaveBeenCalled();
+    expect(await env.STORY_LOG_BUCKET.head(manifestKey)).toBeNull();
+    expect(await env.STORY_LOG_BUCKET.head(chunkKey)).toBeNull();
+    const state = await env.DB.prepare(`
+      SELECT
+        (SELECT status FROM story_logs WHERE id = ?1) AS log_status,
+        (SELECT deletion_status FROM log_archives WHERE id = ?2) AS deletion_status,
+        (SELECT COUNT(*) FROM story_log_items WHERE log_id = ?1) AS items,
+        (SELECT COUNT(*) FROM story_chunks WHERE log_id = ?1) AS chunks,
+        (SELECT status FROM jobs WHERE id = ?3) AS job_status
+    `)
+      .bind(logId, archiveId, jobId)
+      .first<{
+        log_status: string;
+        deletion_status: string;
+        items: number;
+        chunks: number;
+        job_status: string;
+      }>();
+    expect(state).toEqual({
+      log_status: 'deleted',
+      deletion_status: 'deleted',
+      items: 0,
+      chunks: 0,
+      job_status: 'completed',
+    });
   });
 });

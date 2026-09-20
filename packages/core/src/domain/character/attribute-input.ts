@@ -133,6 +133,48 @@ const coc7AttributeAliases: Readonly<Record<string, string>> = {
   克苏鲁: '克苏鲁神话',
 };
 
+const dnd5eAttributeAliases: Readonly<Record<string, string>> = {
+  str: '力量',
+  strength: '力量',
+  dex: '敏捷',
+  dexterity: '敏捷',
+  con: '体质',
+  constitution: '体质',
+  int: '智力',
+  intelligence: '智力',
+  wis: '感知',
+  wisdom: '感知',
+  cha: '魅力',
+  charisma: '魅力',
+  pb: '熟练',
+  hp: 'HP',
+  health: 'HP',
+  hpmax: 'MaxHP',
+  maxhp: 'MaxHP',
+  temphp: 'TempHP',
+  dss: 'DSS',
+  dsf: 'DSF',
+  proficiency: '熟练',
+  athletics: '运动',
+  acrobatics: '体操',
+  sleightofhand: '巧手',
+  stealth: '隐匿',
+  investigation: '调查',
+  arcana: '奥秘',
+  history: '历史',
+  nature: '自然',
+  religion: '宗教',
+  perception: '察觉',
+  insight: '洞悉',
+  animalhandling: '驯兽',
+  medicine: '医药',
+  survival: '求生',
+  persuasion: '游说',
+  deception: '欺瞒',
+  intimidation: '威吓',
+  performance: '表演',
+};
+
 export function parseAttributeAssignments(text: string): readonly AttributeAssignment[] {
   return Array.from(text.matchAll(attributeAssignmentPattern), (match) => ({
     name: match[1] ?? '',
@@ -143,8 +185,13 @@ export function parseAttributeAssignments(text: string): readonly AttributeAssig
 
 export function normalizeAttributeName(ruleSet: string, name: string): string {
   const trimmedName = name.trim();
-  if (ruleSet.toLowerCase() !== 'coc7') {
-    return trimmedName;
+  const normalizedRuleSet = ruleSet.toLowerCase();
+  if (normalizedRuleSet === 'coc7') {
+    return coc7AttributeAliases[trimmedName.toLowerCase()] ?? trimmedName;
   }
-  return coc7AttributeAliases[trimmedName.toLowerCase()] ?? trimmedName;
+  if (normalizedRuleSet === 'dnd5e') {
+    const lookupKey = trimmedName.toLowerCase().replaceAll(/[\s_-]/gu, '');
+    return dnd5eAttributeAliases[lookupKey] ?? trimmedName;
+  }
+  return trimmedName;
 }

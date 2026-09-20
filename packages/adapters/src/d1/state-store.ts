@@ -1,4 +1,5 @@
 import type {
+  ArchiveStatus,
   CharacterSheet,
   CommandCommit,
   CommandScope,
@@ -63,11 +64,11 @@ export class D1StateStore implements StateStore {
       INSERT INTO received_events (
         id, bot_id, event_id, message_key, conversation_seq, status,
         payload, config_digest, seed, sender_scene, sender_scope_id, sender_external_id,
-        sender_role, sender_name, event_timestamp, created_at, updated_at
+        sender_role, sender_name, event_timestamp, mentions, created_at, updated_at
       ) VALUES (
         ?1, ?2, ?3, ?4,
         COALESCE((SELECT receive_seq FROM conversations WHERE bot_id = ?2 AND scene = ?5 AND external_id = ?6), 1),
-        'pending', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, datetime('now'), datetime('now')
+        'pending', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, datetime('now'), datetime('now')
       )
     `)
       .bind(
@@ -86,6 +87,7 @@ export class D1StateStore implements StateStore {
         event.sender.role ?? null,
         event.sender.name ?? null,
         event.timestamp.toISOString(),
+        event.mentions ? JSON.stringify(event.mentions) : null,
       );
 
     const insertEventWithoutRoleStmt = this.db
@@ -374,9 +376,46 @@ export class D1StateStore implements StateStore {
       principalId = prinRow.id;
     }
 
+    const ownedSheetRows = await this.db
+      .prepare(`
+        SELECT id, owner_principal, rule_set, name, attributes, version, created_at, updated_at
+        FROM character_sheets
+        WHERE bot_id = ?1 AND owner_principal IN (?2, ?3)
+        ORDER BY created_at ASC, id ASC
+      `)
+      .bind(scope.botId, principalId, scope.principal.externalId)
+      .all<{
+        id: string;
+        owner_principal: string;
+        rule_set: string;
+        name: string;
+        attributes: string;
+        version: number;
+        created_at: string;
+        updated_at: string;
+      }>();
+    const ownedSheets: CharacterSheet[] = [];
+    for (const row of ownedSheetRows.results) {
+      let attributes: Record<string, number> = {};
+      try {
+        attributes = JSON.parse(row.attributes) as Record<string, number>;
+      } catch {}
+      ownedSheets.push({
+        id: row.id,
+        ownerId: row.owner_principal,
+        ruleSet: row.rule_set,
+        name: row.name,
+        attributes: Object.freeze(attributes),
+        version: row.version,
+        createdAt: new Date(row.created_at),
+        updatedAt: new Date(row.updated_at),
+      });
+    }
+
     const [
       activeLogRes,
       latestLogRes,
+      storyLogsRes,
       bindingRes,
       policyRes,
       encounterRes,
@@ -406,6 +445,27 @@ export class D1StateStore implements StateStore {
         .bind(scope.botId, conversationId),
       this.db
         .prepare(`
+        SELECT l.id, l.name, l.status, l.revision, l.created_at,
+               (SELECT COUNT(*) FROM story_log_items i
+                WHERE i.bot_id = l.bot_id AND i.log_id = l.id) AS item_count,
+               (SELECT COUNT(*) FROM story_log_items i
+                WHERE i.bot_id = l.bot_id AND i.log_id = l.id AND i.is_dice = 1) AS roll_count,
+               a.id AS archive_id, a.status AS archive_status
+        FROM story_logs l
+        LEFT JOIN log_archives a ON a.id = (
+          SELECT candidate.id
+          FROM log_archives candidate
+          WHERE candidate.bot_id = l.bot_id AND candidate.log_id = l.id
+          ORDER BY candidate.created_at DESC, candidate.id DESC
+          LIMIT 1
+        )
+        WHERE l.bot_id = ?1 AND l.conversation_id = ?2
+        ORDER BY l.created_at DESC, l.id DESC
+        LIMIT 50
+      `)
+        .bind(scope.botId, conversationId),
+      this.db
+        .prepare(`
         SELECT sheet_id, version FROM character_bindings
         WHERE bot_id = ?1 AND conversation_id = ?2 AND principal_id = ?3
         LIMIT 1
@@ -416,10 +476,12 @@ export class D1StateStore implements StateStore {
         SELECT id, scope_type, scope_id, principal_id, action, reason, version
         FROM policy_entries
         WHERE bot_id = ?1 AND (
-          scope_type = 'bot'
-          OR (scope_type = 'group' AND scope_id = ?2)
-          OR (scope_type = 'user' AND scope_id = ?3)
-          OR principal_id = ?4
+          (scope_type = 'bot' AND (principal_id IS NULL OR principal_id IN (?3, ?4)))
+          OR (
+            scope_type = 'group' AND scope_id = ?2
+            AND (principal_id IS NULL OR principal_id IN (?3, ?4))
+          )
+          OR (scope_type = 'user' AND scope_id IN (?3, ?4))
         )
       `)
         .bind(scope.botId, scope.externalId, scope.principal.externalId, principalId),
@@ -535,6 +597,32 @@ export class D1StateStore implements StateStore {
         }
       : undefined;
 
+    const storyLogs: StoryLogSnapshot[] = (storyLogsRes?.results ?? []).map((rawRow) => {
+      const row = rawRow as {
+        id: string;
+        name: string;
+        status: StoryLogSnapshot['status'];
+        revision: number;
+        created_at: string;
+        item_count: number;
+        roll_count: number;
+        archive_id: string | null;
+        archive_status: ArchiveStatus | null;
+      };
+      return {
+        id: row.id,
+        name: row.name,
+        status: row.status,
+        version: row.revision,
+        itemCount: row.item_count,
+        rollCount: row.roll_count,
+        createdAt: new Date(row.created_at),
+        ...(row.archive_id && row.archive_status
+          ? { archive: { id: row.archive_id, status: row.archive_status } }
+          : {}),
+      };
+    });
+
     const encounterRow = ((encounterRes?.results?.[0] as unknown) ?? null) as {
       id: string;
       conversation_id: string;
@@ -644,6 +732,115 @@ export class D1StateStore implements StateStore {
       }
     }
 
+    const delegateSheets: Record<string, CharacterSheet> = {};
+    if (scope.delegates && scope.delegates.length > 0) {
+      const delegateResults = await this.db.batch(
+        scope.delegates.map((delegate) =>
+          this.db
+            .prepare(`
+              SELECT s.id, s.owner_principal, s.rule_set, s.name, s.attributes,
+                     s.version, s.created_at, s.updated_at
+              FROM principals p
+              JOIN character_bindings b
+                ON b.bot_id = p.bot_id AND b.principal_id = p.id AND b.conversation_id = ?1
+              JOIN character_sheets s
+                ON s.bot_id = b.bot_id AND s.id = b.sheet_id
+              WHERE p.bot_id = ?2 AND p.scene = ?3 AND p.scope_id = ?4 AND p.external_id = ?5
+              LIMIT 1
+            `)
+            .bind(
+              conversationId,
+              scope.botId,
+              delegate.scene,
+              delegate.scopeId,
+              delegate.externalId,
+            ),
+        ),
+      );
+      for (let index = 0; index < scope.delegates.length; index += 1) {
+        const delegate = scope.delegates[index];
+        const row = delegateResults[index]?.results?.[0] as
+          | {
+              id: string;
+              owner_principal: string;
+              rule_set: string;
+              name: string;
+              attributes: string;
+              version: number;
+              created_at: string;
+              updated_at: string;
+            }
+          | undefined;
+        if (!delegate || !row) {
+          continue;
+        }
+        let attributes: Record<string, number> = {};
+        try {
+          attributes = JSON.parse(row.attributes) as Record<string, number>;
+        } catch {}
+        delegateSheets[delegate.externalId] = {
+          id: row.id,
+          ownerId: row.owner_principal,
+          ruleSet: row.rule_set,
+          name: row.name,
+          attributes: Object.freeze(attributes),
+          version: row.version,
+          createdAt: new Date(row.created_at),
+          updatedAt: new Date(row.updated_at),
+        };
+      }
+    }
+
+    const delegatePolicyEntries: Record<string, PolicyEntry> = {};
+    if (scope.delegates && scope.delegates.length > 0) {
+      const delegatePolicyResults = await this.db.batch(
+        scope.delegates.map((delegate) =>
+          this.db
+            .prepare(`
+              SELECT pe.id, pe.scope_type, pe.principal_id, pe.action, pe.reason, pe.version
+              FROM principals p
+              JOIN policy_entries pe
+                ON pe.bot_id = p.bot_id
+                AND pe.scope_type = 'group'
+                AND pe.scope_id = ?1
+                AND pe.principal_id IN (p.id, p.external_id)
+              WHERE p.bot_id = ?2 AND p.scene = ?3 AND p.scope_id = ?4 AND p.external_id = ?5
+              LIMIT 1
+            `)
+            .bind(
+              scope.externalId,
+              scope.botId,
+              delegate.scene,
+              delegate.scopeId,
+              delegate.externalId,
+            ),
+        ),
+      );
+      for (let index = 0; index < scope.delegates.length; index += 1) {
+        const delegate = scope.delegates[index];
+        const row = delegatePolicyResults[index]?.results?.[0] as
+          | {
+              id: string;
+              scope_type: 'group';
+              principal_id: string | null;
+              action: 'deny' | 'trust';
+              reason: string | null;
+              version: number;
+            }
+          | undefined;
+        if (delegate && row) {
+          delegatePolicyEntries[delegate.externalId] = {
+            id: row.id,
+            scope: 'group',
+            effect: row.action,
+            ...(row.principal_id ? { principalId: row.principal_id } : {}),
+            ...(row.reason ? { reason: row.reason } : {}),
+            version: row.version,
+          };
+        }
+      }
+    }
+
     const policyRows = (policyRes?.results ?? []) as Array<{
       id: string;
       scope_type: string;
@@ -703,12 +900,19 @@ export class D1StateStore implements StateStore {
       conversation,
       ...(characterBinding !== undefined ? { characterBinding } : {}),
       ...(sheet !== undefined ? { sheet } : {}),
+      ownedSheets,
+      ...(Object.keys(delegateSheets).length > 0 ? { delegateSheets } : {}),
+      ...(scope.delegates && scope.delegates.length > 0
+        ? { delegatePrincipals: scope.delegates }
+        : {}),
+      ...(Object.keys(delegatePolicyEntries).length > 0 ? { delegatePolicyEntries } : {}),
       ...(hiddenRollBinding !== undefined ? { hiddenRollBinding } : {}),
       ...(c2cActiveMessagesEnabled !== undefined ? { c2cActiveMessagesEnabled } : {}),
       policyEntries,
       permissions,
       ...(activeStoryLog !== undefined ? { activeStoryLog } : {}),
       ...(latestStoryLog !== undefined ? { latestStoryLog } : {}),
+      storyLogs,
       ...(encounter !== undefined ? { encounter } : {}),
       deckSessions,
     };
@@ -800,6 +1004,43 @@ export class D1StateStore implements StateStore {
               update.newVersion,
             ),
         );
+      } else if (update.type === 'character-sheet-delete') {
+        statements.push(
+          this.db
+            .prepare(`
+              INSERT INTO commit_guards (
+                bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version
+              )
+              SELECT ?1, ?2, 'character_delete', ?3, ?4, COALESCE((
+                SELECT version
+                FROM character_sheets
+                WHERE bot_id = ?1 AND id = ?3 AND owner_principal = ?5
+              ), -1)
+            `)
+            .bind(
+              plan.botId,
+              plan.transactionId,
+              update.sheetId,
+              update.expectedVersion,
+              update.ownerPrincipal,
+            ),
+        );
+        statements.push(
+          this.db
+            .prepare(`
+              DELETE FROM character_bindings
+              WHERE bot_id = ?1 AND sheet_id = ?2
+            `)
+            .bind(plan.botId, update.sheetId),
+        );
+        statements.push(
+          this.db
+            .prepare(`
+              DELETE FROM character_sheets
+              WHERE bot_id = ?1 AND id = ?2 AND owner_principal = ?3 AND version = ?4
+            `)
+            .bind(plan.botId, update.sheetId, update.ownerPrincipal, update.expectedVersion),
+        );
       } else if (update.type === 'character-binding') {
         if (update.expectedVersion > 0) {
           statements.push(
@@ -866,28 +1107,79 @@ export class D1StateStore implements StateStore {
           );
         }
       } else if (update.type === 'policy-entry') {
-        statements.push(
-          this.db
-            .prepare(`
-            INSERT INTO commit_guards (bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version)
-            SELECT ?1, ?2, 'policy', ?3, ?4, COALESCE((SELECT version FROM policy_entries WHERE bot_id = ?1 AND id = ?3), -1)
-          `)
-            .bind(plan.botId, plan.transactionId, update.entryId, update.expectedVersion),
-        );
-
+        if (update.expectedVersion > 0) {
+          statements.push(
+            this.db
+              .prepare(`
+                INSERT INTO commit_guards (
+                  bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version
+                )
+                SELECT ?1, ?2, 'policy', ?3, ?4, COALESCE((
+                  SELECT version FROM policy_entries WHERE bot_id = ?1 AND id = ?3
+                ), -1)
+              `)
+              .bind(plan.botId, plan.transactionId, update.entryId, update.expectedVersion),
+          );
+        }
         const reason = update.changes.reason ?? null;
-
+        const principal = update.changes.principalId ?? null;
         statements.push(
           this.db
             .prepare(`
-            UPDATE policy_entries
-            SET action = ?1,
-                reason = COALESCE(?2, reason),
-                version = ?3,
+              INSERT INTO policy_entries (
+                id, bot_id, scope_type, scope_id, principal_id, action, reason,
+                version, created_at, updated_at
+              )
+              VALUES (
+                ?1, ?2, ?3, ?4,
+                COALESCE((
+                  SELECT id FROM principals
+                  WHERE bot_id = ?2 AND (id = ?5 OR external_id = ?5)
+                  ORDER BY CASE WHEN id = ?5 THEN 0 ELSE 1 END
+                  LIMIT 1
+                ), ?5),
+                ?6, ?7, ?8, datetime('now'), datetime('now')
+              )
+              ON CONFLICT(bot_id, id) DO UPDATE SET
+                scope_type = excluded.scope_type,
+                scope_id = excluded.scope_id,
+                principal_id = excluded.principal_id,
+                action = excluded.action,
+                reason = excluded.reason,
+                version = excluded.version,
                 updated_at = datetime('now')
-            WHERE bot_id = ?4 AND id = ?5
-          `)
-            .bind(update.changes.effect, reason, update.newVersion, plan.botId, update.entryId),
+              WHERE policy_entries.version = ?9
+            `)
+            .bind(
+              update.entryId,
+              plan.botId,
+              update.changes.scope,
+              update.changes.scopeId,
+              principal,
+              update.changes.effect,
+              reason,
+              update.newVersion,
+              update.expectedVersion,
+            ),
+        );
+      } else if (update.type === 'policy-entry-delete') {
+        statements.push(
+          this.db
+            .prepare(`
+              INSERT INTO commit_guards (
+                bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version
+              )
+              SELECT ?1, ?2, 'policy_delete', ?3, ?4, COALESCE((
+                SELECT version FROM policy_entries WHERE bot_id = ?1 AND id = ?3
+              ), -1)
+            `)
+            .bind(plan.botId, plan.transactionId, update.entryId, update.expectedVersion),
+          this.db
+            .prepare(`
+              DELETE FROM policy_entries
+              WHERE bot_id = ?1 AND id = ?2 AND version = ?3
+            `)
+            .bind(plan.botId, update.entryId, update.expectedVersion),
         );
       } else if (update.type === 'deck-session') {
         if (update.expectedVersion > 0) {
@@ -955,6 +1247,67 @@ export class D1StateStore implements StateStore {
               update.changes.status,
               update.newVersion,
             ),
+        );
+      } else if (update.type === 'story-log-delete') {
+        statements.push(
+          this.db
+            .prepare(`
+              INSERT INTO commit_guards (
+                bot_id, transaction_id, resource_type, resource_id, expected_version, actual_version
+              )
+              SELECT ?1, ?2, 'story_log_delete', ?3, ?4, COALESCE((
+                SELECT revision
+                FROM story_logs
+                WHERE bot_id = ?1 AND id = ?3 AND status = 'closed'
+              ), -1)
+            `)
+            .bind(plan.botId, plan.transactionId, update.logId, update.expectedVersion),
+          this.db
+            .prepare(`
+              UPDATE story_logs
+              SET status = 'deleting', revision = ?3, updated_at = datetime('now')
+              WHERE bot_id = ?1 AND id = ?2 AND status = 'closed' AND revision = ?4
+            `)
+            .bind(plan.botId, update.logId, update.newVersion, update.expectedVersion),
+          this.db
+            .prepare(`
+              UPDATE archive_grants
+              SET revoked_at = COALESCE(revoked_at, datetime('now'))
+              WHERE bot_id = ?1 AND archive_id IN (
+                SELECT id FROM log_archives WHERE bot_id = ?1 AND log_id = ?2
+              )
+            `)
+            .bind(plan.botId, update.logId),
+          this.db
+            .prepare(`
+              UPDATE jobs
+              SET status = 'dead', error_code = 'ARCHIVE_DELETING',
+                  lease = NULL, lease_expires_at = NULL, updated_at = datetime('now')
+              WHERE bot_id = ?1 AND resource_id IN (
+                SELECT id FROM log_archives WHERE bot_id = ?1 AND log_id = ?2
+              ) AND type = 'archive-chunk' AND status IN ('pending', 'failed')
+            `)
+            .bind(plan.botId, update.logId),
+          this.db
+            .prepare(`
+              UPDATE log_archives
+              SET deletion_status = 'deleting', updated_at = datetime('now')
+              WHERE bot_id = ?1 AND log_id = ?2 AND deletion_status <> 'deleted'
+            `)
+            .bind(plan.botId, update.logId),
+          this.db
+            .prepare(`
+              INSERT INTO jobs (
+                id, bot_id, type, resource_id, status, attempts, max_attempts,
+                next_attempt_at, deadline, fencing_token, created_at, updated_at
+              )
+              VALUES (
+                ?1, ?2, 'archive-delete', ?3, 'pending', 0, 5,
+                datetime('now'), datetime('now', '+1 day'), '0', datetime('now'), datetime('now')
+              )
+              ON CONFLICT(bot_id, id) DO NOTHING
+            `)
+            .bind(update.jobId, plan.botId, update.logId),
         );
       } else if (update.type === 'story-log-archive') {
         const manifestKey = `archives/${update.archiveId}.manifest.json`;
@@ -1385,7 +1738,7 @@ export class D1StateStore implements StateStore {
 
     return {
       jobId: row.id,
-      type: row.type as 'command' | 'archive-chunk',
+      type: row.type as 'command' | 'archive-chunk' | 'archive-delete',
       resourceId: row.resource_id,
       status: row.status as 'pending' | 'processing' | 'completed' | 'failed' | 'dead',
       attempts: row.attempts,
@@ -1438,7 +1791,7 @@ export class D1StateStore implements StateStore {
     const nextFencing = Number.parseInt(String(row.fencing_token ?? '0'), 10) || 0;
     const updatedJob: StoredJob = {
       jobId: row.id,
-      type: row.type as 'command' | 'archive-chunk',
+      type: row.type as 'command' | 'archive-chunk' | 'archive-delete',
       resourceId: row.resource_id,
       status: 'processing',
       attempts: row.attempts,
@@ -1507,7 +1860,7 @@ export class D1StateStore implements StateStore {
 
     return (rows.results ?? []).map((row) => ({
       jobId: row.id,
-      type: row.type as 'command' | 'archive-chunk',
+      type: row.type as 'command' | 'archive-chunk' | 'archive-delete',
       resourceId: row.resource_id,
       status: row.status as 'pending' | 'processing' | 'completed' | 'failed' | 'dead',
       attempts: row.attempts,

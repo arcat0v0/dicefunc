@@ -31,6 +31,12 @@ export async function scheduled(
         type: 'archive-chunk',
         schemaVersion: 1,
       });
+    } else if (job.type === 'archive-delete') {
+      await deps.jobQueue.enqueueArchive({
+        jobId: job.jobId,
+        type: 'archive-delete',
+        schemaVersion: 1,
+      });
     }
   }
 

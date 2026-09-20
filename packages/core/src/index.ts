@@ -32,6 +32,7 @@ export * from './domain/rules/dnd5e/combat.js';
 export * from './domain/rules/dnd5e/character-state.js';
 export * from './domain/rules/dnd5e/character-gen.js';
 export * from './domain/rules/dnd5e/death-saves.js';
+export * from './domain/rules/dnd5e/check.js';
 export * from './domain/rules/glossary.js';
 export * from './domain/fun/jrrp.js';
 export * from './domain/fun/gugu.js';

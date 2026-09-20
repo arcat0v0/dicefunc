@@ -78,6 +78,7 @@ export class DefaultEventHandler implements EventHandler {
       scene: event.scene,
       externalId: event.externalId,
       principal: event.sender,
+      ...(event.mentions && event.mentions.length > 0 ? { delegates: event.mentions } : {}),
     };
 
     const deadline = new Date(event.timestamp.getTime() + 300_000);

@@ -2,6 +2,7 @@ import type {
   Clock,
   EventClaim,
   JobQueue,
+  Principal,
   RuntimeLogger,
   SceneType,
   StateStore,
@@ -254,6 +255,41 @@ export async function handleQQWebhook(
     }
 
     const text = typeof d.content === 'string' ? d.content : '';
+    const mentions: Principal[] = [];
+    if (scene !== 'c2c' && Array.isArray(d.mentions)) {
+      const seenMentionIds = new Set<string>();
+      for (const value of d.mentions) {
+        if (!value || typeof value !== 'object') {
+          continue;
+        }
+        const mention = value as Record<string, unknown>;
+        const mentionedExternalId =
+          (typeof mention.member_openid === 'string' && mention.member_openid.trim()) ||
+          (typeof mention.user_openid === 'string' && mention.user_openid.trim()) ||
+          (typeof mention.openid === 'string' && mention.openid.trim()) ||
+          (typeof mention.id === 'string' && mention.id.trim()) ||
+          '';
+        if (
+          !mentionedExternalId ||
+          mentionedExternalId === deps.botId ||
+          mentionedExternalId === senderExternalId ||
+          seenMentionIds.has(mentionedExternalId)
+        ) {
+          continue;
+        }
+        seenMentionIds.add(mentionedExternalId);
+        const mentionedName =
+          (typeof mention.username === 'string' && mention.username.trim()) ||
+          (typeof mention.name === 'string' && mention.name.trim()) ||
+          undefined;
+        mentions.push({
+          scene,
+          scopeId: externalId,
+          externalId: mentionedExternalId,
+          ...(mentionedName ? { name: mentionedName } : {}),
+        });
+      }
+    }
 
     let timestamp: Date;
     if (typeof d.timestamp === 'string' || typeof d.timestamp === 'number') {
@@ -284,6 +320,7 @@ export async function handleQQWebhook(
               : undefined,
         ...(rawRole ? { role: rawRole } : {}),
       },
+      ...(mentions.length > 0 ? { mentions } : {}),
     };
     const claim = await deps.stateStore.claimEvent(verifiedEvent, deps.configDigest);
     if (claim.alreadyProcessed) {

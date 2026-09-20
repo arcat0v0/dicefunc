@@ -1,6 +1,7 @@
 import type { ExecutionContext, Message, MessageBatch } from '@cloudflare/workers-types';
 import {
   type EventClaim,
+  type Principal,
   type QueueMessage,
   type SceneType,
   type VerifiedEvent,
@@ -232,6 +233,7 @@ export async function handleCommandMessage(
       sender_role?: string | null;
       sender_name?: string | null;
       event_timestamp?: string | null;
+      mentions?: string | null;
       created_at: string;
     };
 
@@ -240,7 +242,7 @@ export async function handleCommandMessage(
       row = await env.DB.prepare(`
         SELECT id, bot_id, event_id, message_key, conversation_seq, status, payload, config_digest, seed,
                sender_scene, sender_scope_id, sender_external_id, sender_role, sender_name,
-               event_timestamp, created_at
+               event_timestamp, mentions, created_at
         FROM received_events
         WHERE bot_id = ?1 AND event_id = ?2
         LIMIT 1
@@ -277,6 +279,22 @@ export async function handleCommandMessage(
     const scene = (parts[0] ?? 'groupAt') as SceneType;
     const messageId = parts[parts.length - 1] ?? row.event_id;
     const externalId = parts.length > 2 ? parts.slice(1, -1).join(':') : (parts[1] ?? '');
+    let mentions: readonly Principal[] | undefined;
+    if (row.mentions) {
+      try {
+        const parsed = JSON.parse(row.mentions) as unknown;
+        if (Array.isArray(parsed)) {
+          mentions = parsed.filter(
+            (value): value is Principal =>
+              value !== null &&
+              typeof value === 'object' &&
+              typeof (value as Partial<Principal>).scene === 'string' &&
+              typeof (value as Partial<Principal>).scopeId === 'string' &&
+              typeof (value as Partial<Principal>).externalId === 'string',
+          );
+        }
+      } catch {}
+    }
 
     verifiedEvent = {
       botId: row.bot_id,
@@ -293,6 +311,7 @@ export async function handleCommandMessage(
         ...(row.sender_name ? { name: row.sender_name } : {}),
         ...(row.sender_role ? { role: row.sender_role } : {}),
       },
+      ...(mentions && mentions.length > 0 ? { mentions } : {}),
     };
 
     claim = {
@@ -340,6 +359,21 @@ export async function handleCommandMessage(
         });
       } catch {
         retryCode = 'ARCHIVE_ENQUEUE_FAILED';
+      }
+    }
+  }
+
+  if (retryCode === '') {
+    const deletionJob = await deps.stateStore.getJob(env.QQ_APP_ID, `job_delete_log_${eventId}`);
+    if (deletionJob?.type === 'archive-delete' && deletionJob.status === 'pending') {
+      try {
+        await deps.jobQueue.enqueueArchive({
+          jobId: deletionJob.jobId,
+          type: 'archive-delete',
+          schemaVersion: 1,
+        });
+      } catch {
+        retryCode = 'ARCHIVE_DELETE_ENQUEUE_FAILED';
       }
     }
   }
@@ -714,6 +748,139 @@ async function handleArchiveMessage(
   }
 }
 
+async function handleArchiveDeleteMessage(
+  jobId: string,
+  msg: Message<QueueMessage>,
+  env: Env,
+  deps: WorkerDependencies,
+): Promise<void> {
+  const lease = await deps.stateStore.acquireJob(env.QQ_APP_ID, jobId, 60);
+  if (!lease) {
+    const job = await deps.stateStore.getJob(env.QQ_APP_ID, jobId);
+    if (job && job.status !== 'completed' && job.status !== 'dead') {
+      msg.retry({ delaySeconds: 60 });
+    } else {
+      msg.ack();
+    }
+    return;
+  }
+
+  const logId = lease.job.resourceId;
+  try {
+    const log = await env.DB.prepare(`
+      SELECT status FROM story_logs WHERE bot_id = ?1 AND id = ?2 LIMIT 1
+    `)
+      .bind(env.QQ_APP_ID, logId)
+      .first<{ status: string }>();
+    if (!log || log.status === 'deleted') {
+      await deps.stateStore.completeJob(env.QQ_APP_ID, jobId, lease.fencingToken, 'completed');
+      msg.ack();
+      return;
+    }
+    if (log.status !== 'deleting') {
+      await deps.stateStore.completeJob(
+        env.QQ_APP_ID,
+        jobId,
+        lease.fencingToken,
+        'dead',
+        'LOG_NOT_DELETING',
+      );
+      msg.ack();
+      return;
+    }
+
+    const activeArchiveJobs = await env.DB.prepare(`
+      SELECT COUNT(*) AS count
+      FROM jobs j
+      JOIN log_archives a ON a.bot_id = j.bot_id AND a.id = j.resource_id
+      WHERE j.bot_id = ?1 AND a.log_id = ?2 AND j.type = 'archive-chunk'
+        AND j.status = 'processing'
+        AND j.lease_expires_at IS NOT NULL
+        AND datetime(j.lease_expires_at) >= datetime('now')
+    `)
+      .bind(env.QQ_APP_ID, logId)
+      .first<{ count: number }>();
+    if ((activeArchiveJobs?.count ?? 0) > 0) {
+      throw new Error('Archive writer lease is still active');
+    }
+
+    const keyRows = await env.DB.prepare(`
+      SELECT object_key FROM log_archives WHERE bot_id = ?1 AND log_id = ?2
+      UNION
+      SELECT object_key FROM story_chunks WHERE bot_id = ?1 AND log_id = ?2
+    `)
+      .bind(env.QQ_APP_ID, logId)
+      .all<{ object_key: string }>();
+    for (const row of keyRows.results ?? []) {
+      if (row.object_key) {
+        await deps.archiveStore.remove(row.object_key);
+      }
+    }
+
+    await env.DB.batch([
+      env.DB.prepare(`
+          DELETE FROM outgoing_messages WHERE bot_id = ?1 AND story_log_id = ?2
+        `).bind(env.QQ_APP_ID, logId),
+      env.DB.prepare(`
+          DELETE FROM story_log_items WHERE bot_id = ?1 AND log_id = ?2
+        `).bind(env.QQ_APP_ID, logId),
+      env.DB.prepare(`
+          DELETE FROM story_chunks WHERE bot_id = ?1 AND log_id = ?2
+        `).bind(env.QQ_APP_ID, logId),
+      env.DB.prepare(`
+          UPDATE log_archives
+          SET status = 'deleted', deletion_status = 'deleted', updated_at = datetime('now')
+          WHERE bot_id = ?1 AND log_id = ?2 AND deletion_status = 'deleting'
+        `).bind(env.QQ_APP_ID, logId),
+      env.DB.prepare(`
+          UPDATE story_logs
+          SET status = 'deleted', updated_at = datetime('now')
+          WHERE bot_id = ?1 AND id = ?2 AND status = 'deleting'
+        `).bind(env.QQ_APP_ID, logId),
+    ]);
+    await deps.stateStore.completeJob(env.QQ_APP_ID, jobId, lease.fencingToken, 'completed');
+    msg.ack();
+  } catch {
+    deps.logger.log(
+      buildLogEntry({
+        level: 'error',
+        event: 'queue.archive_delete.failed',
+        component: 'queue-archive',
+        environment: env.ENVIRONMENT,
+        jobId,
+        outcome: 'error',
+        errorCode: 'ARCHIVE_DELETE_RETRY',
+      }),
+    );
+    if (lease.job.attempts >= lease.job.maxAttempts) {
+      await deps.stateStore.completeJob(
+        env.QQ_APP_ID,
+        jobId,
+        lease.fencingToken,
+        'dead',
+        'ARCHIVE_DELETE_RETRY',
+      );
+      msg.ack();
+      return;
+    }
+    const backoffSeconds = Math.min(300, 2 ** lease.job.attempts * 5);
+    await env.DB.prepare(`
+      UPDATE jobs
+      SET status = 'failed',
+          next_attempt_at = datetime('now', '+' || ?1 || ' seconds'),
+          error_code = 'ARCHIVE_DELETE_RETRY',
+          lease = NULL,
+          lease_expires_at = NULL,
+          updated_at = datetime('now')
+      WHERE bot_id = ?2 AND id = ?3
+        AND CAST(COALESCE(fencing_token, '0') AS INTEGER) = ?4
+    `)
+      .bind(backoffSeconds, env.QQ_APP_ID, jobId, lease.fencingToken)
+      .run();
+    msg.retry({ delaySeconds: backoffSeconds });
+  }
+}
+
 export async function queue(
   batch: MessageBatch<QueueMessage>,
   env: Env,
@@ -728,7 +895,7 @@ export async function queue(
       !body ||
       typeof body.jobId !== 'string' ||
       !body.jobId ||
-      (body.type !== 'command' && body.type !== 'archive-chunk')
+      (body.type !== 'command' && body.type !== 'archive-chunk' && body.type !== 'archive-delete')
     ) {
       msg.ack();
       continue;
@@ -738,6 +905,8 @@ export async function queue(
       await handleCommandMessage(body.jobId, msg, env, deps);
     } else if (body.type === 'archive-chunk') {
       await handleArchiveMessage(body.jobId, msg, env, deps);
+    } else if (body.type === 'archive-delete') {
+      await handleArchiveDeleteMessage(body.jobId, msg, env, deps);
     }
   }
 }

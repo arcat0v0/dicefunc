@@ -201,6 +201,30 @@ const DND_ORC_NAMES = [
   '纳兹格林·战吼',
 ];
 
+const DND_DAMARA_NAMES = ['阿列克·冬河', '米蕾娜·白松', '博里斯·霜径', '娜佳·晨钟'];
+
+const DND_CALIMSHAN_NAMES = ['扎希尔·阿萨德', '莱拉·纳吉尔', '卡西姆·萨法', '法蒂玛·拉希德'];
+
+const DND_RASHEMEN_NAMES = ['伊万·雷歌', '塔季扬娜·鹰雪', '米哈伊尔·黑林', '叶莲娜·风纹'];
+
+const DND_SHOU_NAMES = ['梁远舟', '顾青岚', '沈月白', '陆昭明'];
+
+const DND_SEA_NAMES = ['涟歌·潮汐', '深蓝·逐浪', '珊影·静湾', '沧鸣·远礁'];
+
+const DND_GOBLIN_NAMES = ['咔嗒·铜扣', '吱牙·碎锅', '泥点·快脚', '嘎啦·亮帽'];
+
+const DND_NAME_POOLS: Readonly<Record<string, readonly string[]>> = {
+  达马拉: DND_DAMARA_NAMES,
+  卡林珊: DND_CALIMSHAN_NAMES,
+  莱瑟曼: DND_RASHEMEN_NAMES,
+  受国: DND_SHOU_NAMES,
+  精灵: DND_ELF_NAMES,
+  矮人: DND_DWARF_NAMES,
+  兽人: DND_ORC_NAMES,
+  海族: DND_SEA_NAMES,
+  地精: DND_GOBLIN_NAMES,
+};
+
 export async function generateRandomName(
   type: 'cn' | 'en' | 'jp',
   count: number,
@@ -248,13 +272,14 @@ export async function generateDndName(
 ): Promise<string[]> {
   const boundedCount = Math.max(1, Math.min(10, count));
   const lower = race.toLowerCase();
-  let pool = DND_ELF_NAMES;
-
-  if (lower.includes('矮人') || lower.includes('dwarf')) {
-    pool = DND_DWARF_NAMES;
-  } else if (lower.includes('兽人') || lower.includes('orc')) {
-    pool = DND_ORC_NAMES;
-  }
+  const aliases: Readonly<Record<string, string>> = {
+    elf: '精灵',
+    dwarf: '矮人',
+    orc: '兽人',
+    goblin: '地精',
+  };
+  const key = aliases[lower] ?? race;
+  const pool = DND_NAME_POOLS[key] ?? DND_ELF_NAMES;
 
   const names: string[] = [];
   for (let i = 0; i < boundedCount; i++) {

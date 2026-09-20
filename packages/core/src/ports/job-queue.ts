@@ -1,6 +1,6 @@
 export interface QueueMessage {
   readonly jobId: string;
-  readonly type: 'command' | 'archive-chunk';
+  readonly type: 'command' | 'archive-chunk' | 'archive-delete';
   readonly schemaVersion: number;
 }
 

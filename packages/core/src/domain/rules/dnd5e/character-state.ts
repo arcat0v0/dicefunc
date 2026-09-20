@@ -2,6 +2,8 @@ export interface DndHpState {
   readonly maxHp: number;
   readonly currentHp: number;
   readonly tempHp: number;
+  readonly deathSaveSuccesses?: number | undefined;
+  readonly deathSaveFailures?: number | undefined;
 }
 
 export interface SpellSlotLevel {
@@ -19,21 +21,29 @@ export function applyDamage(
   readonly nextState: DndHpState;
   readonly effectiveDamage: number;
   readonly tempHpAbsorbed: number;
+  readonly deathSaveFailureAdded: number;
+  readonly massiveDamage: boolean;
 } {
   const actualDamage = Math.max(0, damage);
   const tempHpAbsorbed = Math.min(state.tempHp, actualDamage);
   const remainingDamage = actualDamage - tempHpAbsorbed;
   const nextTempHp = state.tempHp - tempHpAbsorbed;
   const nextCurrentHp = Math.max(0, state.currentHp - remainingDamage);
+  const deathSaveFailureAdded = state.currentHp === 0 && remainingDamage > 0 ? 1 : 0;
+  const massiveDamage = state.currentHp > 0 && remainingDamage - state.currentHp >= state.maxHp;
 
   return {
     nextState: {
       maxHp: state.maxHp,
       currentHp: nextCurrentHp,
       tempHp: nextTempHp,
+      deathSaveSuccesses: state.deathSaveSuccesses ?? 0,
+      deathSaveFailures: (state.deathSaveFailures ?? 0) + deathSaveFailureAdded,
     },
     effectiveDamage: remainingDamage,
     tempHpAbsorbed,
+    deathSaveFailureAdded,
+    massiveDamage,
   };
 }
 
@@ -47,12 +57,15 @@ export function applyHealing(
   const actualHealing = Math.max(0, healing);
   const nextCurrentHp = Math.min(state.maxHp, state.currentHp + actualHealing);
   const effectiveHealing = nextCurrentHp - state.currentHp;
+  const recovered = nextCurrentHp > 0;
 
   return {
     nextState: {
       maxHp: state.maxHp,
       currentHp: nextCurrentHp,
       tempHp: state.tempHp,
+      deathSaveSuccesses: recovered ? 0 : (state.deathSaveSuccesses ?? 0),
+      deathSaveFailures: recovered ? 0 : (state.deathSaveFailures ?? 0),
     },
     effectiveHealing,
   };
@@ -63,6 +76,8 @@ export function setTempHp(state: DndHpState, tempHp: number): DndHpState {
     maxHp: state.maxHp,
     currentHp: state.currentHp,
     tempHp: Math.max(state.tempHp, Math.max(0, tempHp)),
+    deathSaveSuccesses: state.deathSaveSuccesses ?? 0,
+    deathSaveFailures: state.deathSaveFailures ?? 0,
   };
 }
 
@@ -72,6 +87,8 @@ export function setMaxHp(state: DndHpState, maxHp: number): DndHpState {
     maxHp: nextMaxHp,
     currentHp: Math.min(nextMaxHp, state.currentHp),
     tempHp: state.tempHp,
+    deathSaveSuccesses: state.deathSaveSuccesses ?? 0,
+    deathSaveFailures: state.deathSaveFailures ?? 0,
   };
 }
 
@@ -146,6 +163,8 @@ export function performLongRest(
       maxHp: hp.maxHp,
       currentHp: hp.maxHp,
       tempHp: 0,
+      deathSaveSuccesses: 0,
+      deathSaveFailures: 0,
     },
     nextSlots: restoreSpellSlots(slots),
   };

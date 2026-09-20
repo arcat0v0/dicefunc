@@ -209,6 +209,60 @@ describe('QQ Webhook handler integration', () => {
     expect(eventRow?.sender_role).toBe('owner');
   });
 
+  it('preserves signed group mentions for delegated commands', async () => {
+    const queue = new RecordingJobQueue();
+    const timestamp = '1710000011';
+    const payloadObj = {
+      op: 0,
+      id: 'evt_group_mentions_1',
+      t: 'GROUP_AT_MESSAGE_CREATE',
+      d: {
+        id: 'msg_group_mentions_1',
+        group_openid: 'group_mentions_1',
+        content: '.ra <@delegate_openid> 侦查',
+        author: {
+          member_openid: 'member_sender_openid',
+        },
+        mentions: [
+          { member_openid: botId, username: 'DiceFunc' },
+          { member_openid: 'delegate_openid', username: 'Delegate' },
+        ],
+      },
+    };
+    const bodyBytes = new TextEncoder().encode(JSON.stringify(payloadObj));
+    const signature = await signPayload(privateKey, timestamp, bodyBytes);
+
+    const result = await handleQQWebhook(
+      { rawBody: bodyBytes.buffer, signature, timestamp },
+      {
+        stateStore: store,
+        queue,
+        botId,
+        botSecret,
+        configDigest,
+      },
+      logger,
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.preloaded?.verifiedEvent.mentions).toEqual([
+      {
+        scene: 'groupAt',
+        scopeId: 'group_mentions_1',
+        externalId: 'delegate_openid',
+        name: 'Delegate',
+      },
+    ]);
+    const eventRow = await env.DB.prepare(
+      'SELECT mentions FROM received_events WHERE bot_id = ?1 AND event_id = ?2',
+    )
+      .bind(botId, 'evt_group_mentions_1')
+      .first<{ mentions: string | null }>();
+    expect(JSON.parse(eventRow?.mentions ?? '[]')).toEqual(
+      result.preloaded?.verifiedEvent.mentions,
+    );
+  });
+
   it('persists active C2C authorization changes without enqueuing commands', async () => {
     const queue = new RecordingJobQueue();
     const authorizationBotId = 'bot_c2c_authorization_test';

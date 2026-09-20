@@ -6,9 +6,12 @@ import {
   type ConversationSession,
   DefaultCommandRegistry,
   type HiddenRollLinkReader,
+  type RandomSource,
   type StateSnapshot,
   type VerifiedEvent,
+  addCombatant,
   createCharacterSheet,
+  createCombatEncounter,
   createConversationSession,
   createDefaultCommandRegistry,
   createWebCryptoRandomSource,
@@ -20,6 +23,7 @@ function createTestContext(
   conversationOverrides: Partial<ConversationSession> = {},
   snapshotOverrides: Partial<StateSnapshot> = {},
   hiddenRollLinks?: HiddenRollLinkReader,
+  random: RandomSource = createWebCryptoRandomSource(),
 ): CommandContext {
   const baseConversation = createConversationSession({
     id: 'conv_test_1',
@@ -53,7 +57,7 @@ function createTestContext(
   };
   return {
     snapshot,
-    random: createWebCryptoRandomSource(),
+    random,
     clock: systemClock,
     permissions: snapshot.permissions,
     budget: {
@@ -69,6 +73,25 @@ function createTestContext(
     configVersion: '1.0.0',
     botId: 'bot_test_1',
     ...(hiddenRollLinks ? { hiddenRollLinks } : {}),
+  };
+}
+
+function sequenceRandom(values: readonly number[]): RandomSource {
+  let index = 0;
+  return {
+    async integer(minInclusive: number, maxInclusive: number): Promise<number> {
+      const value = values[index];
+      index += 1;
+      if (value === undefined || value < minInclusive || value > maxInclusive) {
+        throw new Error(
+          `Invalid deterministic random value ${String(value)} for ${minInclusive}-${maxInclusive}`,
+        );
+      }
+      return value;
+    },
+    async bytes(length: number): Promise<Uint8Array> {
+      return new Uint8Array(length);
+    },
   };
 }
 
@@ -253,170 +276,88 @@ describe('Disabled conversation command execution', () => {
 describe('Help and userid commands', () => {
   const executor = new CommandExecutor();
 
-  it('provides command overview on .help without arguments', async () => {
-    const ctx = createTestContext();
-    const decision = await executor.execute(createTestEvent('.help'), ctx);
+  it('publishes only implemented command families', async () => {
+    const decision = await executor.execute(createTestEvent('.help'), createTestContext());
 
-    expect(decision.results).toHaveLength(1);
     expect(decision.results[0]?.kind).toBe('help');
-    expect(decision.replies).toHaveLength(1);
-    expect(decision.replies[0]?.text).toContain('DiceFunc 0.1.0');
-    expect(decision.replies[0]?.text).toContain('https://github.com/arcat0v0/dicefunc');
-    expect(decision.replies[0]?.text).toContain('.help 骰点/骰主/协议/娱乐/跑团/扩展/查询/其他');
-    expect(decision.replies[0]?.text).toContain('跑团机器人已就绪。');
+    expect(decision.replies[0]?.text).toContain('DiceFunc');
+    expect(decision.replies[0]?.text).toContain('.help 骰点');
+    expect(decision.replies[0]?.text).toContain('.help COC7');
+    expect(decision.replies[0]?.text).toContain('.help DND5E');
+    expect(decision.replies[0]?.text).not.toContain('.ext');
+    expect(decision.replies[0]?.text).not.toContain('reload');
   });
 
-  it('supports .帮助 and .h aliases for help command', async () => {
+  it('uses the same overview for help aliases', async () => {
     const ctx = createTestContext();
-    const decisionZh = await executor.execute(createTestEvent('.帮助'), ctx);
-    const decisionH = await executor.execute(createTestEvent('.h'), ctx);
+    const direct = await executor.execute(createTestEvent('.help'), ctx);
+    const chinese = await executor.execute(createTestEvent('.帮助'), ctx);
+    const short = await executor.execute(createTestEvent('.h'), ctx);
 
-    expect(decisionZh.replies[0]?.text).toContain('.help 骰点/骰主/协议/娱乐/跑团/扩展/查询/其他');
-    expect(decisionH.replies[0]?.text).toContain('.help 骰点/骰主/协议/娱乐/跑团/扩展/查询/其他');
+    expect(chinese.replies[0]?.text).toBe(direct.replies[0]?.text);
+    expect(short.replies[0]?.text).toBe(direct.replies[0]?.text);
   });
 
-  it('provides help for specific subtopics', async () => {
+  it('documents actual syntax and does not claim fake reload support', async () => {
     const ctx = createTestContext();
+    const checks = await executor.execute(createTestEvent('.help ra'), ctx);
+    expect(checks.replies[0]?.text).toContain('.ra/rc');
+    expect(checks.replies[0]?.text).not.toContain('.check');
 
-    const rollHelp = await executor.execute(createTestEvent('.help 骰点'), ctx);
-    expect(rollHelp.replies[0]?.text).toContain('.help 骰点：');
-    expect(rollHelp.replies[0]?.text).toContain('.r');
-    expect(rollHelp.replies[0]?.text).toContain('.ra 侦查');
+    const initiative = await executor.execute(createTestEvent('.help init'), ctx);
+    expect(initiative.replies[0]?.text).toContain('.init end');
+    expect(initiative.replies[0]?.text).toContain('.init clr');
 
-    const trpgHelp = await executor.execute(createTestEvent('.help 跑团'), ctx);
-    expect(trpgHelp.replies[0]?.text).toContain('.help 跑团：');
-    expect(trpgHelp.replies[0]?.text).toContain('.st');
-    expect(trpgHelp.replies[0]?.text).toContain('.coc');
-    expect(trpgHelp.replies[0]?.text).toContain('.pc');
+    const slots = await executor.execute(createTestEvent('.help ss'), ctx);
+    expect(slots.replies[0]?.text).toContain('.ss set <环阶> <总数>');
+    expect(slots.replies[0]?.text).not.toContain('.ss reset');
 
-    const extHelp = await executor.execute(createTestEvent('.help 扩展'), ctx);
-    expect(extHelp.replies[0]?.text).toContain('.help 扩展：');
-    expect(extHelp.replies[0]?.text).toContain('.ext coc7 on');
+    const saves = await executor.execute(createTestEvent('.help ds'), ctx);
+    expect(saves.replies[0]?.text).toContain('.ds stat');
+    expect(saves.replies[0]?.text).not.toContain('.ds reset');
 
-    const masterHelp = await executor.execute(createTestEvent('.help 骰主'), ctx);
-    expect(masterHelp.replies[0]?.text).toBe('骰主很神秘，什么都没有说——');
-
-    const agreementHelp = await executor.execute(createTestEvent('.help 协议'), ctx);
-    expect(agreementHelp.replies[0]?.text).toContain('请在遵守以下规则前提下使用:');
-
-    const funHelp = await executor.execute(createTestEvent('.help 娱乐'), ctx);
-    expect(funHelp.replies[0]?.text).toContain('帮助:娱乐');
-    expect(funHelp.replies[0]?.text).toContain('.gugu');
-    expect(funHelp.replies[0]?.text).toContain('.jrrp');
-
-    const otherHelp = await executor.execute(createTestEvent('.help 其他'), ctx);
-    expect(otherHelp.replies[0]?.text).toContain('帮助:其他');
-
-    const searchHelp = await executor.execute(createTestEvent('.help 查询'), ctx);
-    expect(searchHelp.replies[0]?.text).toContain('查询指令：');
+    const reload = await executor.execute(createTestEvent('.help reload'), ctx);
+    expect(reload.replies[0]?.text).not.toContain('重新装载');
+    expect(reload.replies[0]?.text).toContain('未找到');
   });
 
-  it('provides meta help on .help help', async () => {
+  it('groups implemented COC, DND, card, logging, and utility commands', async () => {
     const ctx = createTestContext();
-    const decision = await executor.execute(createTestEvent('.help help'), ctx);
+    const coc = await executor.execute(createTestEvent('.help COC7'), ctx);
+    expect(coc.replies[0]?.text).toContain('.ra');
+    expect(coc.replies[0]?.text).toContain('.sc');
+    expect(coc.replies[0]?.text).toContain('.en');
 
-    expect(decision.replies[0]?.text).toContain('帮助指令，用于查看指令帮助和helpdoc中录入的信息:');
-    expect(decision.replies[0]?.text).toContain('.help 指令');
-    expect(decision.replies[0]?.text).toContain('.help reload');
+    const dnd = await executor.execute(createTestEvent('.help DND5E'), ctx);
+    expect(dnd.replies[0]?.text).toContain('.init');
+    expect(dnd.replies[0]?.text).toContain('.ss');
+    expect(dnd.replies[0]?.text).toContain('.longrest');
+
+    const cards = await executor.execute(createTestEvent('.help 角色卡'), ctx);
+    expect(cards.replies[0]?.text).toContain('.st');
+    expect(cards.replies[0]?.text).toContain('.pc');
+
+    const log = await executor.execute(createTestEvent('.help log'), ctx);
+    expect(log.replies[0]?.text).toContain('.log export');
   });
 
-  it('handles .help reload with and without master permission', async () => {
-    const masterCtx = createTestContext(
-      {},
-      {
-        permissions: {
-          isGroupHost: true,
-          isDiceMaster: true,
-          denied: false,
-          isTrusted: true,
-        },
-      },
-    );
-    const normalCtx = createTestContext(
-      {},
-      {
-        permissions: {
-          isGroupHost: false,
-          isDiceMaster: false,
-          denied: false,
-          isTrusted: true,
-        },
-      },
-    );
-
-    const masterDecision = await executor.execute(createTestEvent('.help reload'), masterCtx);
-    expect(masterDecision.replies[0]?.text).toBe('帮助文档已经重新装载');
-
-    const normalDecision = await executor.execute(createTestEvent('.help reload'), normalCtx);
-    expect(normalDecision.replies[0]?.text).toBe('你不具备Master权限');
-  });
-
-  it('provides specific command help for individual commands', async () => {
+  it('searches the rule glossary for unknown help topics', async () => {
     const ctx = createTestContext();
+    const glossary = await executor.execute(createTestEvent('.help 理智检定'), ctx);
+    expect(glossary.replies[0]?.text).toContain('理智检定');
 
-    const rHelp = await executor.execute(createTestEvent('.help r'), ctx);
-    expect(rHelp.replies[0]?.text).toContain('.r <表达式>');
-
-    const rhHelp = await executor.execute(createTestEvent('.help rh'), ctx);
-    expect(rhHelp.replies[0]?.text).toContain('.rh <表达式>');
-
-    const stHelp = await executor.execute(createTestEvent('.help st'), ctx);
-    expect(stHelp.replies[0]?.text).toContain('.st');
-
-    const nnHelp = await executor.execute(createTestEvent('.help nn'), ctx);
-    expect(nnHelp.replies[0]?.text).toContain('角色名设置:');
-
-    const cocHelp = await executor.execute(createTestEvent('.help coc'), ctx);
-    expect(cocHelp.replies[0]?.text).toContain('COC制卡指令:');
-
-    const dndHelp = await executor.execute(createTestEvent('.help dnd'), ctx);
-    expect(dndHelp.replies[0]?.text).toContain('DND5E制卡指令:');
-
-    const botHelp = await executor.execute(createTestEvent('.help bot'), ctx);
-    expect(botHelp.replies[0]?.text).toContain('.bot on');
-
-    const setHelp = await executor.execute(createTestEvent('.help set'), ctx);
-    expect(setHelp.replies[0]?.text).toContain('群设置指令:');
-
-    const scHelp = await executor.execute(createTestEvent('.help sc'), ctx);
-    expect(scHelp.replies[0]?.text).toContain('理智检定指令：');
-
-    const enHelp = await executor.execute(createTestEvent('.help en'), ctx);
-    expect(enHelp.replies[0]?.text).toContain('技能成长指令：');
-
-    const hpHelp = await executor.execute(createTestEvent('.help hp'), ctx);
-    expect(hpHelp.replies[0]?.text).toContain('HP 管理命令：');
-
-    const drawHelp = await executor.execute(createTestEvent('.help draw'), ctx);
-    expect(drawHelp.replies[0]?.text).toContain('牌堆命令：');
-
-    const logHelp = await executor.execute(createTestEvent('.help log'), ctx);
-    expect(logHelp.replies[0]?.text).toContain('跑团日志管理：');
-
-    const moduHelp = await executor.execute(createTestEvent('.help modu'), ctx);
-    expect(moduHelp.replies[0]?.text).toContain('魔都模组网查询：');
-  });
-
-  it('searches rule glossary on unknown topic or reports no search result', async () => {
-    const ctx = createTestContext();
-
-    const glossaryHelp = await executor.execute(createTestEvent('.help 理智检定'), ctx);
-    expect(glossaryHelp.replies[0]?.text).toContain('理智检定');
-
-    const notFoundHelp = await executor.execute(
+    const missing = await executor.execute(
       createTestEvent('.help 这是一个完全不存在的词条条目xyz123'),
       ctx,
     );
-    expect(notFoundHelp.replies[0]?.text).toBe('未找到搜索结果');
+    expect(missing.replies[0]?.text).toContain('未找到');
   });
 
-  it('provides user and scene identifiers on .userid', async () => {
-    const ctx = createTestContext();
-    const decision = await executor.execute(createTestEvent('.userid'), ctx);
+  it('provides user and conversation identifiers on userid', async () => {
+    const decision = await executor.execute(createTestEvent('.userid'), createTestContext());
 
-    expect(decision.results).toHaveLength(1);
     expect(decision.results[0]?.kind).toBe('userid');
-    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('user_ext_1');
     expect(decision.replies[0]?.text).toContain('group_ext_1');
   });
 });
@@ -912,6 +853,101 @@ describe('Story log command (.log)', () => {
     expect(decision.replies[0]?.text).toContain('测试日志');
     expect(decision.replies[0]?.text).toContain('记录中');
   });
+
+  it('lists logs and resolves named get and stat operations', async () => {
+    const storyLogs = [
+      {
+        id: 'log_old',
+        name: '旧日志',
+        status: 'closed' as const,
+        version: 3,
+        itemCount: 42,
+        rollCount: 7,
+        archive: { id: 'archive_log_old', status: 'ready' as const },
+      },
+      {
+        id: 'log_current',
+        name: '当前日志',
+        status: 'recording' as const,
+        version: 1,
+        itemCount: 5,
+        rollCount: 2,
+      },
+    ];
+    const ctx = {
+      ...createTestContext({}, { storyLogs, activeStoryLog: storyLogs[1] }),
+      publicBaseUrl: 'https://worker.test',
+    };
+
+    const listed = await executor.execute(createTestEvent('.log list'), ctx);
+    expect(listed.results[0]).toMatchObject({
+      kind: 'log.list',
+      data: { logs: expect.arrayContaining([expect.objectContaining({ id: 'log_old' })]) },
+    });
+    expect(listed.replies[0]?.text).toContain('旧日志');
+
+    const stat = await executor.execute(createTestEvent('.log stat 旧日志'), ctx);
+    expect(stat.results[0]).toMatchObject({
+      kind: 'log.stat',
+      data: { log: expect.objectContaining({ id: 'log_old', itemCount: 42, rollCount: 7 }) },
+    });
+    expect(stat.replies[0]?.text).toContain('42');
+    expect(stat.replies[0]?.text).toContain('7');
+
+    const downloaded = await executor.execute(createTestEvent('.log get 旧日志'), ctx);
+    expect(downloaded.results[0]).toMatchObject({
+      kind: 'log.export',
+      data: { logId: 'log_old', archiveId: 'archive_log_old' },
+    });
+    expect(downloaded.updates[0]).toMatchObject({
+      type: 'archive-grant',
+      archiveId: 'archive_log_old',
+    });
+  });
+
+  it('halts without archive upload and starts convergent deletion for closed logs', async () => {
+    const active = {
+      id: 'log_active',
+      name: '现场日志',
+      status: 'recording' as const,
+      version: 2,
+    };
+    const halted = await executor.execute(
+      createTestEvent('.log halt'),
+      createTestContext({}, { activeStoryLog: active, storyLogs: [active] }),
+    );
+    expect(halted.updates).toEqual([
+      {
+        type: 'story-log',
+        logId: 'log_active',
+        conversationId: 'conv_test_1',
+        expectedVersion: 2,
+        changes: { name: '现场日志', status: 'closed' },
+        newVersion: 3,
+      },
+    ]);
+
+    const closed = {
+      id: 'log_closed',
+      name: '待删除',
+      status: 'closed' as const,
+      version: 4,
+      archive: { id: 'archive_log_closed', status: 'ready' as const },
+    };
+    const deleted = await executor.execute(
+      createTestEvent('.log del 待删除'),
+      createTestContext({}, { latestStoryLog: closed, storyLogs: [closed] }),
+    );
+    expect(deleted.updates).toEqual([
+      {
+        type: 'story-log-delete',
+        logId: 'log_closed',
+        expectedVersion: 4,
+        newVersion: 5,
+        jobId: 'job_delete_log_evt_1',
+      },
+    ]);
+  });
 });
 describe('Nickname command (.nn)', () => {
   const executor = new CommandExecutor();
@@ -987,8 +1023,13 @@ describe('Check commands (.ra / .rc)', () => {
     expect(decision.results).toHaveLength(1);
     expect(decision.results[0]?.kind).toBe('coc.check');
     expect(decision.replies).toHaveLength(1);
-    expect(decision.replies[0]?.text).toMatch(/1D100\s*=\s*\d+/);
-    expect(decision.replies[0]?.text).toContain('60');
+    expect(decision.results[0]?.data).toMatchObject({
+      skill: { name: '检定' },
+      target: { value: 60 },
+    });
+    expect(decision.results[0]?.data.roll).toMatchObject({
+      total: expect.any(Number),
+    });
   });
 
   it('performs COC7 check with bound character skill on .ra 侦查', async () => {
@@ -1440,8 +1481,8 @@ describe('Sanity check command (.sc)', () => {
     const ctx = createTestContext();
     const decision = await executor.execute(createTestEvent('.sc'), ctx);
 
-    expect(decision.replies).toHaveLength(1);
-    expect(decision.replies[0]?.text).toContain('理智检定指令：');
+    expect(decision.replies[0]?.templateKey).toBe('coc.sc.help');
+    expect(decision.replies[0]?.text).toContain('--cap');
   });
 
   it('performs sanity check and decreases san on .sc 1/1d6', async () => {
@@ -1457,9 +1498,12 @@ describe('Sanity check command (.sc)', () => {
 
     expect(decision.results).toHaveLength(1);
     expect(decision.results[0]?.kind).toBe('coc.sc');
-    expect(decision.replies).toHaveLength(1);
-    expect(decision.replies[0]?.text).toContain('爱德华 的理智检定:');
-    expect(decision.replies[0]?.text).toContain('理智变化: 60 ➯');
+    expect(decision.replies[0]?.templateKey).toBe('coc.sc');
+    expect(decision.results[0]?.data).toMatchObject({
+      sanOld: 60,
+      sanNew: expect.any(Number),
+      sanLoss: expect.any(Number),
+    });
     expect(decision.updates).toHaveLength(1);
     const update = decision.updates[0];
     expect(update?.type).toBe('character-sheet');
@@ -1476,7 +1520,8 @@ describe('Sanity check command (.sc)', () => {
     const ctx = createTestContext({}, { sheet });
     const decision = await executor.execute(createTestEvent('.sc 10/10'), ctx);
 
-    expect(decision.replies[0]?.text).toContain('临时性疯狂');
+    expect(decision.results[0]?.data).toMatchObject({ sanLoss: 10 });
+    expect(decision.replies[0]?.text).toContain('临时疯狂');
   });
 });
 
@@ -1513,8 +1558,8 @@ describe('Skill growth command (.en)', () => {
     const ctx = createTestContext();
     const decision = await executor.execute(createTestEvent('.en'), ctx);
 
-    expect(decision.replies).toHaveLength(1);
-    expect(decision.replies[0]?.text).toContain('技能成长指令：');
+    expect(decision.replies[0]?.templateKey).toBe('coc.en.help');
+    expect(decision.replies[0]?.text).toContain('多个技能');
   });
 
   it('performs skill growth check on .en 侦查 with bound sheet', async () => {
@@ -1763,7 +1808,7 @@ describe('Character sheet save and load (.pc save / .pc load)', () => {
       name: '艾莉丝',
       attributes: { 力量: 50 },
     });
-    const ctx = createTestContext({}, { sheet });
+    const ctx = createTestContext({}, { principalId: 'principal_1', sheet });
     const decision = await executor.execute(createTestEvent('.pc save 战斗卡'), ctx);
 
     expect(decision.results).toHaveLength(1);
@@ -1774,20 +1819,122 @@ describe('Character sheet save and load (.pc save / .pc load)', () => {
     if (update?.type === 'character-sheet') {
       expect(update.changes.name).toBe('战斗卡');
       expect(update.changes.attributes).toEqual({ 力量: 50 });
+      expect(update.changes.ownerPrincipal).toBe('principal_1');
+      expect(update.sheetId).not.toContain('战斗卡');
     }
-    expect(decision.replies[0]?.text).toContain('已保存角色卡「战斗卡」');
+    expect(decision.replies[0]?.templateKey).toBe('character.save');
   });
 
-  it('binds saved character on .pc load <name>', async () => {
-    const ctx = createTestContext();
+  it('binds an owned character selected by name', async () => {
+    const saved = createCharacterSheet({
+      id: 'sheet_saved',
+      ownerId: 'principal_1',
+      ruleSet: 'coc7',
+      name: '战斗卡',
+      attributes: { 力量: 50 },
+    });
+    const ctx = createTestContext({}, { principalId: 'principal_1', ownedSheets: [saved] });
     const decision = await executor.execute(createTestEvent('.pc load 战斗卡'), ctx);
 
-    expect(decision.results).toHaveLength(1);
     expect(decision.results[0]?.kind).toBe('character.load');
-    expect(decision.updates).toHaveLength(1);
-    const update = decision.updates[0];
-    expect(update?.type).toBe('character-binding');
-    expect(decision.replies[0]?.text).toContain('已将当前会话绑定至角色卡「战斗卡」');
+    expect(decision.updates[0]).toMatchObject({
+      type: 'character-binding',
+      changes: { sheetId: 'sheet_saved' },
+    });
+  });
+
+  it('rejects loading a missing or foreign character', async () => {
+    const decision = await executor.execute(
+      createTestEvent('.pc load 不存在'),
+      createTestContext({}, { principalId: 'principal_1', ownedSheets: [] }),
+    );
+
+    expect(decision.results).toHaveLength(0);
+    expect(decision.updates).toHaveLength(0);
+    expect(decision.replies[0]?.templateKey).toBe('character.not_found');
+  });
+
+  it('lists every owned character and marks the active one', async () => {
+    const first = createCharacterSheet({
+      id: 'sheet_first',
+      ownerId: 'principal_1',
+      ruleSet: 'coc7',
+      name: '第一张卡',
+    });
+    const second = createCharacterSheet({
+      id: 'sheet_second',
+      ownerId: 'principal_1',
+      ruleSet: 'coc7',
+      name: '第二张卡',
+    });
+    const decision = await executor.execute(
+      createTestEvent('.pc list'),
+      createTestContext(
+        {},
+        {
+          principalId: 'principal_1',
+          sheet: second,
+          ownedSheets: [first, second],
+        },
+      ),
+    );
+
+    expect(decision.results[0]?.data).toMatchObject({
+      activeSheetId: 'sheet_second',
+      sheets: [
+        { id: 'sheet_first', name: '第一张卡', active: false },
+        { id: 'sheet_second', name: '第二张卡', active: true },
+      ],
+    });
+  });
+
+  it('renames the active character and deletes an owned character by name', async () => {
+    const active = {
+      ...createCharacterSheet({
+        id: 'sheet_active',
+        ownerId: 'principal_1',
+        ruleSet: 'coc7',
+        name: '旧名',
+      }),
+      version: 3,
+    };
+    const archived = {
+      ...createCharacterSheet({
+        id: 'sheet_archived',
+        ownerId: 'principal_1',
+        ruleSet: 'coc7',
+        name: '归档卡',
+      }),
+      version: 2,
+    };
+    const snapshot = {
+      principalId: 'principal_1',
+      sheet: active,
+      ownedSheets: [active, archived],
+    };
+
+    const renamed = await executor.execute(
+      createTestEvent('.pc rename 新名'),
+      createTestContext({}, snapshot),
+    );
+    expect(renamed.updates[0]).toMatchObject({
+      type: 'character-sheet',
+      sheetId: 'sheet_active',
+      expectedVersion: 3,
+      changes: { name: '新名' },
+      newVersion: 4,
+    });
+
+    const deleted = await executor.execute(
+      createTestEvent('.pc del 归档卡'),
+      createTestContext({}, snapshot),
+    );
+    expect(deleted.updates[0]).toEqual({
+      type: 'character-sheet-delete',
+      sheetId: 'sheet_archived',
+      ownerPrincipal: 'principal_1',
+      expectedVersion: 2,
+    });
   });
 });
 
@@ -1827,6 +1974,24 @@ describe('Rule glossary search command (.find)', () => {
 
     expect(decision.replies).toHaveLength(1);
     expect(decision.replies[0]?.text).toContain('未找到与');
+  });
+  it('supports lookup aliases, grouped pagination, and stable entry IDs', async () => {
+    const ctx = createTestContext();
+    const grouped = await executor.execute(createTestEvent('.查询 list dnd5e 2'), ctx);
+    expect(grouped.results[0]).toMatchObject({
+      kind: 'rule.find.list',
+      data: { group: 'dnd5e', page: 2, totalPages: 2 },
+    });
+    expect(grouped.replies[0]?.text).toContain('DND5E');
+
+    const byId = await executor.execute(createTestEvent('.査詢 #1'), ctx);
+    expect(byId.results[0]).toMatchObject({
+      kind: 'rule.find',
+      data: {
+        matches: [expect.objectContaining({ id: 1, ruleSet: 'coc7' })],
+      },
+    });
+    expect(byId.replies[0]?.text).toContain('理智检定');
   });
 });
 
@@ -1898,5 +2063,587 @@ describe('Entertainment and utility commands (.jrrp / .gugu / .name / .namednd /
 
     expect(decision.replies).toHaveLength(1);
     expect(decision.replies[0]?.text).toContain('请提供模组编号');
+  });
+  it('provides low-cost compatibility utilities and aliases', async () => {
+    const defaultNames = await executor.execute(createTestEvent('.name'), createTestContext());
+    expect(defaultNames.results[0]?.data).toMatchObject({ count: 5 });
+
+    const regionalName = await executor.execute(
+      createTestEvent('.namednd 达马拉 2'),
+      createTestContext(),
+    );
+    expect(regionalName.results[0]).toMatchObject({
+      kind: 'fun.namednd',
+      data: { race: '达马拉', count: 2 },
+    });
+
+    const chineseAlias = await executor.execute(createTestEvent('.咕咕'), createTestContext());
+    expect(chineseAlias.results[0]?.kind).toBe('fun.gugu');
+
+    const moduAlias = await executor.execute(createTestEvent('.cnmods help'), createTestContext());
+    expect(moduAlias.replies[0]?.text).toContain('魔都模组网查询');
+
+    const ping = await executor.execute(createTestEvent('.ping'), createTestContext());
+    expect(ping.results[0]).toMatchObject({ kind: 'utility.ping' });
+
+    const who = await executor.execute(
+      createTestEvent('.who 甲 乙 丙'),
+      createTestContext({}, {}, undefined, sequenceRandom([0, 0])),
+    );
+    expect(who.results[0]).toMatchObject({
+      kind: 'utility.who',
+      data: { choices: expect.arrayContaining(['甲', '乙', '丙']) },
+    });
+  });
+});
+
+describe('SealDice compatibility entry contracts', () => {
+  const executor = new CommandExecutor();
+
+  it('routes compact Unicode arguments through the matching command', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_compact',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '调查员',
+      attributes: { 侦查: 65 },
+    });
+    const ctx = createTestContext({}, { sheet });
+
+    const check = await executor.execute(createTestEvent('。ra侦查'), ctx);
+    expect(check.results[0]?.kind).toBe('coc.check');
+    expect(check.results[0]?.data).toMatchObject({
+      skill: { name: '侦查' },
+      target: { value: 65 },
+    });
+
+    const attributes = await executor.execute(createTestEvent('.st力量50敏捷60'), ctx);
+    expect(attributes.results[0]?.kind).toBe('character.attributes.set');
+    expect(attributes.updates[0]).toMatchObject({
+      type: 'character-sheet',
+      changes: { attributes: expect.objectContaining({ 力量: 50, 敏捷: 60 }) },
+    });
+
+    const growth = await executor.execute(createTestEvent('.en侦查'), ctx);
+    expect(growth.results[0]?.kind).toBe('coc.en');
+    expect(growth.results[0]?.data).toMatchObject({ skill: '侦查', oldValue: 65 });
+  });
+
+  it('rejects missing check targets instead of inventing values', async () => {
+    const noSheet = createTestContext();
+    const empty = await executor.execute(createTestEvent('。ra'), noSheet);
+    expect(empty.results).toHaveLength(0);
+    expect(empty.updates).toHaveLength(0);
+    expect(empty.replies[0]?.templateKey).toBe('coc.check.help');
+
+    const missingSkill = await executor.execute(createTestEvent('.ra 侦查'), noSheet);
+    expect(missingSkill.results).toHaveLength(0);
+    expect(missingSkill.replies[0]?.templateKey).toBe('coc.check.missing_attribute');
+
+    const dndMissing = await executor.execute(
+      createTestEvent('.ra 隐匿'),
+      createTestContext({ ruleSet: 'dnd5e' }),
+    );
+    expect(dndMissing.results).toHaveLength(0);
+    expect(dndMissing.replies[0]?.templateKey).toBe('dnd5e.check.missing_attribute');
+  });
+
+  it('reserves check for the unsupported SealDice authenticity command', async () => {
+    const decision = await executor.execute(createTestEvent('.check'), createTestContext());
+    expect(decision.results).toHaveLength(0);
+    expect(decision.updates).toHaveLength(0);
+    expect(decision.replies[0]?.templateKey).toBe('system.check.unsupported');
+  });
+
+  it('advances initiative on end and clears only on clr', async () => {
+    const base = createCombatEncounter({
+      id: 'enc_test',
+      conversationId: 'conv_test_1',
+      version: 1,
+    });
+    const withFirst = addCombatant(base, { id: 'a', name: '甲', initiative: 20 });
+    const encounter = addCombatant(withFirst, { id: 'b', name: '乙', initiative: 10 });
+    const ctx = createTestContext(
+      { ruleSet: 'dnd5e' },
+      {
+        encounter: {
+          id: encounter.id,
+          conversationId: encounter.conversationId,
+          state: encounter,
+          version: encounter.version,
+        },
+      },
+    );
+
+    const advanced = await executor.execute(createTestEvent('.init end'), ctx);
+    expect(advanced.results[0]?.kind).toBe('dnd5e.init.next');
+    expect(advanced.updates[0]).toMatchObject({
+      type: 'encounter',
+      changes: { state: expect.objectContaining({ turnIndex: 1 }) },
+    });
+
+    const cleared = await executor.execute(createTestEvent('.init clr'), ctx);
+    expect(cleared.results[0]?.kind).toBe('dnd5e.init.clear');
+    expect(cleared.updates[0]).toMatchObject({
+      type: 'encounter',
+      changes: { state: expect.objectContaining({ combatants: [] }) },
+    });
+  });
+
+  it('separates batch initiative rolling from list administration', async () => {
+    const rolled = await executor.execute(
+      createTestEvent('.ri =1d10+3 王五, +2 李四, 12 张三'),
+      createTestContext({ ruleSet: 'dnd5e' }, {}, undefined, sequenceRandom([7, 10])),
+    );
+    expect(rolled.results[0]?.kind).toBe('dnd5e.initiative.roll');
+    expect(rolled.results[0]?.data).toMatchObject({
+      items: expect.arrayContaining([
+        expect.objectContaining({ name: '王五', initiative: 10 }),
+        expect.objectContaining({ name: '李四', initiative: 12 }),
+        expect.objectContaining({ name: '张三', initiative: 12 }),
+      ]),
+    });
+    expect(rolled.updates[0]).toMatchObject({
+      type: 'encounter',
+      changes: {
+        state: expect.objectContaining({
+          combatants: expect.arrayContaining([
+            expect.objectContaining({ name: '王五', initiative: 10 }),
+            expect.objectContaining({ name: '李四', initiative: 12 }),
+            expect.objectContaining({ name: '张三', initiative: 12 }),
+          ]),
+        }),
+      },
+    });
+
+    const listed = await executor.execute(
+      createTestEvent('.init'),
+      createTestContext({ ruleSet: 'dnd5e' }),
+    );
+    expect(listed.updates).toHaveLength(0);
+    expect(listed.replies[0]?.templateKey).toBe('dnd5e.init.empty');
+  });
+
+  it('removes named combatants through init del', async () => {
+    const base = createCombatEncounter({
+      id: 'enc_delete',
+      conversationId: 'conv_test_1',
+      version: 1,
+    });
+    const encounter = addCombatant(
+      addCombatant(base, { id: 'actor_甲', name: '甲', initiative: 20 }),
+      { id: 'actor_乙', name: '乙', initiative: 10 },
+    );
+    const decision = await executor.execute(
+      createTestEvent('.init del 甲'),
+      createTestContext(
+        { ruleSet: 'dnd5e' },
+        {
+          encounter: {
+            id: encounter.id,
+            conversationId: encounter.conversationId,
+            state: encounter,
+            version: encounter.version,
+          },
+        },
+      ),
+    );
+
+    expect(decision.results[0]?.kind).toBe('dnd5e.init.remove');
+    expect(decision.updates[0]).toMatchObject({
+      changes: {
+        state: expect.objectContaining({
+          combatants: [expect.objectContaining({ name: '乙' })],
+        }),
+      },
+    });
+  });
+
+  it('rejects invalid initiative values instead of using ten', async () => {
+    const decision = await executor.execute(
+      createTestEvent('.init set 调查员 not-a-number'),
+      createTestContext({ ruleSet: 'dnd5e' }),
+    );
+    expect(decision.results).toHaveLength(0);
+    expect(decision.updates).toHaveLength(0);
+    expect(decision.replies[0]?.templateKey).toBe('dnd5e.init.invalid');
+  });
+
+  it('switches to COC7 together with the selected house rule', async () => {
+    const decision = await executor.execute(
+      createTestEvent('.setcoc 2'),
+      createTestContext({ ruleSet: 'dnd5e' }),
+    );
+    expect(decision.updates[0]).toMatchObject({
+      type: 'conversation-settings',
+      changes: { cocRule: '2', ruleSet: 'coc7' },
+    });
+  });
+
+  it('reports sender and conversation identifiers separately', async () => {
+    const decision = await executor.execute(createTestEvent('.userid'), createTestContext());
+    expect(decision.results[0]?.data).toMatchObject({
+      userExternalId: 'user_ext_1',
+      conversationExternalId: 'group_ext_1',
+      scene: 'groupAt',
+    });
+    expect(decision.replies[0]?.text).toContain('user_ext_1');
+    expect(decision.replies[0]?.text).toContain('group_ext_1');
+  });
+
+  it('rejects unknown deck and DND race without state changes', async () => {
+    const ctx = createTestContext();
+    const deck = await executor.execute(createTestEvent('.draw definitely-missing'), ctx);
+    expect(deck.results).toHaveLength(0);
+    expect(deck.updates).toHaveLength(0);
+    expect(deck.replies[0]?.templateKey).toBe('deck.not_found');
+
+    const race = await executor.execute(createTestEvent('.namednd definitely-missing'), ctx);
+    expect(race.results).toHaveLength(0);
+    expect(race.updates).toHaveLength(0);
+    expect(race.replies[0]?.templateKey).toBe('fun.namednd.unknown_race');
+  });
+
+  it('uses .deck as a draw-compatible entry and keeps resource operations truthful', async () => {
+    const ctx = createTestContext();
+    const draw = await executor.execute(createTestEvent('.deck fate'), ctx);
+    expect(draw.results[0]).toMatchObject({
+      kind: 'deck.draw',
+      data: { deckId: 'fate' },
+    });
+    expect(draw.updates[0]).toMatchObject({ type: 'deck-session' });
+
+    const search = await executor.execute(createTestEvent('.deck search 命运'), ctx);
+    expect(search.results[0]).toMatchObject({
+      kind: 'deck.search',
+      data: {
+        query: '命运',
+        matches: expect.arrayContaining([expect.objectContaining({ deckId: 'fate' })]),
+      },
+    });
+
+    const reload = await executor.execute(createTestEvent('.deck reload'), ctx);
+    expect(reload.results).toHaveLength(0);
+    expect(reload.updates).toHaveLength(0);
+    expect(reload.replies[0]?.templateKey).toBe('deck.reload_unsupported');
+  });
+
+  it('rejects missing SAN, skill, HP, and MaxHP state', async () => {
+    const blankSheet = createCharacterSheet({
+      id: 'sheet_blank',
+      ownerId: 'user_ext_1',
+
+      ruleSet: 'coc7',
+      name: '空白卡',
+      attributes: {},
+    });
+    const cocCtx = createTestContext({}, { sheet: blankSheet });
+    const sanity = await executor.execute(createTestEvent('.sc 1/1d6'), cocCtx);
+    expect(sanity.results).toHaveLength(0);
+    expect(sanity.replies[0]?.templateKey).toBe('coc.sc.missing_san');
+
+    const growth = await executor.execute(createTestEvent('.en 侦查'), cocCtx);
+    expect(growth.results).toHaveLength(0);
+    expect(growth.replies[0]?.templateKey).toBe('coc.en.missing_skill');
+
+    const dndCtx = createTestContext({ ruleSet: 'dnd5e' }, { sheet: blankSheet });
+    const hp = await executor.execute(createTestEvent('.hp'), dndCtx);
+    expect(hp.results).toHaveLength(0);
+    expect(hp.replies[0]?.templateKey).toBe('dnd5e.hp.missing');
+
+    const rest = await executor.execute(createTestEvent('.longrest'), dndCtx);
+    expect(rest.results).toHaveLength(0);
+    expect(rest.replies[0]?.templateKey).toBe('dnd5e.longrest.missing_max_hp');
+  });
+  it('manages mentioned-user moderation through group-scoped policy updates', async () => {
+    const target = {
+      scene: 'groupAt' as const,
+      scopeId: 'group_ext_1',
+      externalId: 'user_target',
+      name: '目标用户',
+    };
+    const added = await executor.execute(
+      { ...createTestEvent('.black add 刷屏'), mentions: [target] },
+      createTestContext({}, { delegatePrincipals: [target], delegatePolicyEntries: {} }),
+    );
+    expect(added.updates[0]).toMatchObject({
+      type: 'policy-entry',
+      expectedVersion: 0,
+      changes: {
+        scope: 'group',
+        scopeId: 'group_ext_1',
+        principalId: 'user_target',
+        effect: 'deny',
+        reason: '刷屏',
+      },
+    });
+
+    const existing = {
+      id: 'policy_existing',
+      scope: 'group' as const,
+      principalId: 'principal_target',
+      effect: 'deny' as const,
+      reason: '旧原因',
+      version: 2,
+    };
+    const removed = await executor.execute(
+      { ...createTestEvent('.ban rm'), mentions: [target] },
+      createTestContext(
+        {},
+        {
+          delegatePrincipals: [target],
+          delegatePolicyEntries: { user_target: existing },
+        },
+      ),
+    );
+    expect(removed.updates).toEqual([
+      {
+        type: 'policy-entry-delete',
+        entryId: 'policy_existing',
+        expectedVersion: 2,
+      },
+    ]);
+  });
+
+  it('rejects incompatible administration and noncore rules without side effects', async () => {
+    const ctx = createTestContext();
+    for (const command of ['.dismiss', '.botlist', '.master', '.randalgo', '.ext']) {
+      const decision = await executor.execute(createTestEvent(command), ctx);
+      expect(decision.updates).toHaveLength(0);
+      expect(decision.replies[0]?.templateKey).toBe('system.unsupported');
+    }
+    for (const command of ['.rsr', '.ek', '.ekgen', '.dx', '.ww', '.jsr', '.drl']) {
+      const decision = await executor.execute(createTestEvent(command), ctx);
+      expect(decision.updates).toHaveLength(0);
+      expect(decision.replies[0]?.templateKey).toBe('ruleset.unsupported');
+    }
+    for (const command of ['.send', '.reply', '.welcome', '.team']) {
+      const decision = await executor.execute(createTestEvent(command), ctx);
+      expect(decision.updates).toHaveLength(0);
+      expect(decision.replies[0]?.templateKey).toBe('messaging.unsupported');
+    }
+  });
+
+  it('rejects unknown ruleset values', async () => {
+    const decision = await executor.execute(
+      createTestEvent('.set rule imaginary'),
+      createTestContext(),
+    );
+    expect(decision.results).toHaveLength(0);
+    expect(decision.updates).toHaveLength(0);
+    expect(decision.replies[0]?.templateKey).toBe('set.error');
+  });
+});
+
+describe('COC7 daily command compatibility', () => {
+  const executor = new CommandExecutor();
+  const sheet = createCharacterSheet({
+    id: 'sheet_coc_daily',
+    ownerId: 'user_ext_1',
+    ruleSet: 'coc7',
+    name: '调查员',
+    attributes: { 侦查: 65, 图书馆使用: 50, 理智: 60 },
+  });
+
+  it('parses difficulty, bonus dice, modifiers, reasons, and command-level repetitions', async () => {
+    const difficult = await executor.execute(
+      createTestEvent('.ra 困难侦查 潜行接近'),
+      createTestContext({}, { sheet }, undefined, sequenceRandom([40])),
+    );
+    expect(difficult.results[0]?.data).toMatchObject({
+      skill: { name: '侦查' },
+      difficulty: 'hard',
+      requiredLevel: 2,
+      reason: '潜行接近',
+      success: false,
+      target: { value: 65 },
+    });
+
+    const bonus = await executor.execute(
+      createTestEvent('.ra b 侦查'),
+      createTestContext({}, { sheet }, undefined, sequenceRandom([5, 8, 4])),
+    );
+    expect(bonus.results[0]?.data).toMatchObject({
+      bonusDice: 1,
+      roll: { total: 45, values: [85, 45] },
+    });
+
+    const modified = await executor.execute(
+      createTestEvent('.ra 侦查+10 观察门锁'),
+      createTestContext({}, { sheet }, undefined, sequenceRandom([70])),
+    );
+    expect(modified.results[0]?.data).toMatchObject({
+      modifier: 10,
+      reason: '观察门锁',
+      target: { value: 75 },
+    });
+
+    const repeated = await executor.execute(
+      createTestEvent('.ra 3#p 侦查'),
+      createTestContext({}, { sheet }, undefined, sequenceRandom([5, 1, 9, 5, 2, 8, 5, 3, 7])),
+    );
+    expect(repeated.results).toHaveLength(1);
+    expect(repeated.results[0]?.data).toMatchObject({
+      repeat: 3,
+      bonusDice: -1,
+      items: [{ bonusDice: -1 }, { bonusDice: -1 }, { bonusDice: -1 }],
+    });
+    expect(repeated.replies).toHaveLength(1);
+  });
+
+  it('forces rulebook checks for rc and validates the active card ruleset', async () => {
+    const rc = await executor.execute(
+      createTestEvent('.rc 侦查'),
+      createTestContext({ cocRule: '3' }, { sheet }, undefined, sequenceRandom([2])),
+    );
+    expect(rc.results[0]?.data).toMatchObject({ ruleId: '0' });
+
+    const dndSheet = createCharacterSheet({
+      id: 'sheet_wrong_rule',
+      ownerId: 'user_ext_1',
+      ruleSet: 'dnd5e',
+      name: '错误卡',
+      attributes: { 侦查: 65 },
+    });
+    const mismatch = await executor.execute(
+      createTestEvent('.ra 侦查'),
+      createTestContext({}, { sheet: dndSheet }, undefined, sequenceRandom([20])),
+    );
+    expect(mismatch.results).toHaveLength(0);
+    expect(mismatch.replies[0]?.templateKey).toBe('character.rule_mismatch');
+  });
+
+  it('delivers rah and rch results only through trusted hidden-roll bindings', async () => {
+    const ctx = createTestContext(
+      {},
+      {
+        sheet,
+        hiddenRollBinding: {
+          id: 'bind_1',
+          groupScopeId: 'group_ext_1',
+          groupPrincipalId: 'principal_group_1',
+          c2cPrincipalId: 'principal_c2c_1',
+          userOpenid: 'openid_c2c_1',
+          activeMessagesEnabled: true,
+          version: 1,
+        },
+      },
+      undefined,
+      sequenceRandom([30]),
+    );
+    const decision = await executor.execute(createTestEvent('.rah 侦查'), ctx);
+
+    expect(decision.results[0]?.data).toMatchObject({ hidden: true });
+    expect(decision.replies[0]).toMatchObject({
+      scene: 'c2c',
+      targetId: 'openid_c2c_1',
+      deliveryMode: 'active',
+    });
+    expect(decision.replies[1]?.condition).toEqual({ part: 1, status: 'sent' });
+    expect(decision.replies[2]?.condition).toEqual({ part: 1, status: 'failed' });
+  });
+
+  it('resolves opposed checks using success level then skill value', async () => {
+    const decision = await executor.execute(
+      createTestEvent('.rav 侦查65 潜行55'),
+      createTestContext({}, { sheet }, undefined, sequenceRandom([40, 30])),
+    );
+
+    expect(decision.results[0]?.kind).toBe('coc.opposed');
+    expect(decision.results[0]?.data).toMatchObject({
+      left: { skill: '侦查', target: 65, roll: 40 },
+      right: { skill: '潜行', target: 55, roll: 30 },
+      winner: 'left',
+    });
+  });
+
+  it('supports SAN bonus dice, explicit rolls, cap, half, and fumble loss', async () => {
+    const adjusted = await executor.execute(
+      createTestEvent('.sc b 1/1d6 --half --cap=2'),
+      createTestContext({}, { sheet }, undefined, sequenceRandom([0, 9, 8, 6])),
+    );
+    expect(adjusted.results[0]?.data).toMatchObject({
+      bonusDice: 1,
+      roll: 80,
+      sanLoss: 2,
+      cap: 2,
+      half: true,
+    });
+
+    const explicit = await executor.execute(
+      createTestEvent('.sc 50 1/1d6'),
+      createTestContext({}, { sheet }, undefined, sequenceRandom([4])),
+    );
+    expect(explicit.results[0]?.data).toMatchObject({ roll: 50, sanLoss: 1 });
+
+    const fumble = await executor.execute(
+      createTestEvent('.sc 1/1d6'),
+      createTestContext({}, { sheet }, undefined, sequenceRandom([100])),
+    );
+    expect(fumble.results[0]?.data).toMatchObject({ roll: 100, sanLoss: 6 });
+  });
+
+  it('advances multiple skills and applies separate failure and success increments', async () => {
+    const batch = await executor.execute(
+      createTestEvent('.en 侦查 图书馆使用'),
+      createTestContext({}, { sheet }, undefined, sequenceRandom([96, 4, 97, 5])),
+    );
+    expect(batch.results[0]?.data).toMatchObject({
+      items: [
+        { skill: '侦查', oldValue: 65, newValue: 69, increment: 4, success: true },
+        { skill: '图书馆使用', oldValue: 50, newValue: 55, increment: 5, success: true },
+      ],
+    });
+    expect(batch.updates[0]).toMatchObject({
+      type: 'character-sheet',
+      changes: {
+        attributes: expect.objectContaining({ 侦查: 69, 图书馆使用: 55 }),
+      },
+    });
+
+    const failureIncrement = await executor.execute(
+      createTestEvent('.en侦查60 +1/1d10'),
+      createTestContext({}, { sheet }, undefined, sequenceRandom([20])),
+    );
+    expect(failureIncrement.results[0]?.data).toMatchObject({
+      items: [{ skill: '侦查', oldValue: 60, newValue: 61, increment: 1, success: false }],
+    });
+  });
+
+  it('uses the mentioned participant card for delegated checks', async () => {
+    const delegatedSheet = createCharacterSheet({
+      id: 'sheet_coc_delegate',
+      ownerId: 'principal_delegate',
+      ruleSet: 'coc7',
+      name: '受托调查员',
+      attributes: { 侦查: 70 },
+    });
+    const event: VerifiedEvent = {
+      ...createTestEvent('.ra <@delegate_openid> 侦查'),
+      mentions: [
+        {
+          scene: 'groupAt',
+          scopeId: 'group_ext_1',
+          externalId: 'delegate_openid',
+          name: '受托玩家',
+        },
+      ],
+    };
+    const decision = await executor.execute(
+      event,
+      createTestContext(
+        {},
+        { delegateSheets: { delegate_openid: delegatedSheet } },
+        undefined,
+        sequenceRandom([45]),
+      ),
+    );
+
+    expect(decision.results[0]?.data).toMatchObject({
+      actor: '受托调查员',
+      skill: { name: '侦查' },
+      target: { value: 70 },
+      roll: { total: 45 },
+    });
   });
 });
