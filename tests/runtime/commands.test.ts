@@ -1131,3 +1131,74 @@ describe('Rule glossary search command (.find)', () => {
     expect(decision.replies[0]?.text).toContain('未找到与');
   });
 });
+
+describe('Entertainment and utility commands (.jrrp / .gugu / .name / .namednd / .modu)', () => {
+  const executor = new CommandExecutor();
+
+  it('calculates daily luck on .jrrp deterministically', async () => {
+    const ctx = createTestContext();
+    const decision1 = await executor.execute(createTestEvent('.jrrp'), ctx);
+    const decision2 = await executor.execute(createTestEvent('.jrrp'), ctx);
+
+    expect(decision1.results).toHaveLength(1);
+    expect(decision1.results[0]?.kind).toBe('fun.jrrp');
+    expect(decision1.replies).toHaveLength(1);
+    expect(decision1.replies[0]?.text).toContain('今日人品为');
+    expect(decision1.replies[0]?.text).toBe(decision2.replies[0]?.text);
+  });
+
+  it('generates excuse on .gugu and includes author with 来源', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.gugu'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]?.kind).toBe('fun.gugu');
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('🕊️:');
+
+    const decisionAuthor = await executor.execute(createTestEvent('.gugu 来源'), ctx);
+    expect(decisionAuthor.replies[0]?.text).toContain('——');
+  });
+
+  it('generates random names on .name', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.name cn 3'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]?.kind).toBe('fun.name');
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('生成随机名字 (cn)');
+
+    const decisionEn = await executor.execute(createTestEvent('.name en'), ctx);
+    expect(decisionEn.replies[0]?.text).toContain('生成随机名字 (en)');
+
+    const decisionJp = await executor.execute(createTestEvent('.name jp'), ctx);
+    expect(decisionJp.replies[0]?.text).toContain('生成随机名字 (jp)');
+  });
+
+  it('generates DND names on .namednd', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.namednd 矮人 2'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.results[0]?.kind).toBe('fun.namednd');
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('生成 DND 名字 (矮人)');
+  });
+
+  it('shows help on .modu help', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.modu help'), ctx);
+
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('魔都模组网查询：');
+  });
+
+  it('requires module ID on .modu get', async () => {
+    const ctx = createTestContext();
+    const decision = await executor.execute(createTestEvent('.modu get'), ctx);
+
+    expect(decision.replies).toHaveLength(1);
+    expect(decision.replies[0]?.text).toContain('请提供模组编号');
+  });
+});

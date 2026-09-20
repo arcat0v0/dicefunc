@@ -32,6 +32,10 @@ export * from './domain/rules/dnd5e/character-state.js';
 export * from './domain/rules/dnd5e/character-gen.js';
 export * from './domain/rules/dnd5e/death-saves.js';
 export * from './domain/rules/glossary.js';
+export * from './domain/fun/jrrp.js';
+export * from './domain/fun/gugu.js';
+export * from './domain/fun/name.js';
+export * from './domain/fun/modu.js';
 
 export * from './application/commands.js';
 export { CommandExecutor } from './application/execute-command.js';

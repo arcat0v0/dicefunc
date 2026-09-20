@@ -8,6 +8,15 @@ import {
 import { collectDiceBudget, evaluateAst } from '../domain/dice/ast.js';
 import { applyKeepDrop, rollDice } from '../domain/dice/expression.js';
 import { parseDiceExpression } from '../domain/dice/parser.js';
+import { getRandomGugu } from '../domain/fun/gugu.js';
+import { computeJrrp, formatJrrpReply } from '../domain/fun/jrrp.js';
+import {
+  fetchCnmodsDetail,
+  fetchCnmodsSearch,
+  formatCnmodsDetail,
+  formatCnmodsSearchResult,
+} from '../domain/fun/modu.js';
+import { generateDndName, generateRandomName } from '../domain/fun/name.js';
 import {
   type Coc7CardAttributes,
   formatCoc7CardBatch,
@@ -3697,6 +3706,428 @@ async function findHandler(input: CommandInput, context: CommandContext): Promis
   };
 }
 
+async function jrrpHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+  const conv = context.snapshot.conversation;
+  const sheet = context.snapshot.sheet;
+  const senderId = input.sender?.externalId ?? 'unknown';
+  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+
+  const jrrp = computeJrrp(senderId, input.timestamp);
+  const text = formatJrrpReply(actorName, jrrp);
+
+  const reply: PreparedReply = {
+    executionId: input.executionId,
+    part: 1,
+    msgSeq: 1,
+    scene: conv.scene,
+    targetId: conv.externalId,
+    originMessageId: input.messageId,
+    templateKey: 'fun.jrrp',
+    text,
+    deadline,
+  };
+
+  return {
+    results: [
+      {
+        executionId: input.executionId,
+        kind: 'fun.jrrp',
+        ruleVersion: '1.0.0',
+        data: { actor: actorName, jrrp },
+      },
+    ],
+    updates: [],
+    replies: [reply],
+    logItems: [],
+  };
+}
+
+async function guguHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+  const conv = context.snapshot.conversation;
+  const sheet = context.snapshot.sheet;
+  const senderId = input.sender?.externalId ?? 'unknown';
+  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const firstArg = input.args[0]?.toLowerCase().trim();
+
+  if (firstArg === 'help') {
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'fun.gugu.help',
+      text: '咕咕理由指令：\n.gugu // 随机获取一个跑团请假借口\n.gugu 来源 // 附带作者署名',
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  const showFrom =
+    firstArg === 'from' || firstArg === 'showfrom' || firstArg === '来源' || firstArg === '作者';
+
+  const text = await getRandomGugu(context.random, actorName, showFrom);
+
+  const reply: PreparedReply = {
+    executionId: input.executionId,
+    part: 1,
+    msgSeq: 1,
+    scene: conv.scene,
+    targetId: conv.externalId,
+    originMessageId: input.messageId,
+    templateKey: 'fun.gugu',
+    text,
+    deadline,
+  };
+
+  return {
+    results: [
+      {
+        executionId: input.executionId,
+        kind: 'fun.gugu',
+        ruleVersion: '1.0.0',
+        data: { actor: actorName, text },
+      },
+    ],
+    updates: [],
+    replies: [reply],
+    logItems: [],
+  };
+}
+
+async function nameHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+  const conv = context.snapshot.conversation;
+  const args = input.args;
+
+  if (args[0]?.toLowerCase() === 'help') {
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'fun.name.help',
+      text: '随机名字生成：\n.name [cn/en/jp] [<数量>] [<男/女>]\n例：.name cn 3 男 或 .name en',
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  let type: 'cn' | 'en' | 'jp' = 'cn';
+  let count = 1;
+  let gender: 'M' | 'F' | 'any' = 'any';
+
+  for (const arg of args) {
+    const lower = arg.toLowerCase();
+    if (lower === 'cn' || lower === 'zh' || lower === '中文' || lower === '中国') {
+      type = 'cn';
+    } else if (lower === 'en' || lower === '英文' || lower === '英国' || lower === '美国') {
+      type = 'en';
+    } else if (lower === 'jp' || lower === '日文' || lower === '日本') {
+      type = 'jp';
+    } else if (lower === '男' || lower === 'm' || lower === 'male') {
+      gender = 'M';
+    } else if (lower === '女' || lower === 'f' || lower === 'female') {
+      gender = 'F';
+    } else {
+      const num = Number.parseInt(arg, 10);
+      if (!Number.isNaN(num) && num > 0) {
+        count = Math.min(10, num);
+      }
+    }
+  }
+
+  const names = await generateRandomName(type, count, gender, context.random);
+  const text = `生成随机名字 (${type})：\n${names.join('\n')}`;
+
+  const reply: PreparedReply = {
+    executionId: input.executionId,
+    part: 1,
+    msgSeq: 1,
+    scene: conv.scene,
+    targetId: conv.externalId,
+    originMessageId: input.messageId,
+    templateKey: 'fun.name',
+    text,
+    deadline,
+  };
+
+  return {
+    results: [
+      {
+        executionId: input.executionId,
+        kind: 'fun.name',
+        ruleVersion: '1.0.0',
+        data: { type, count, gender, names },
+      },
+    ],
+    updates: [],
+    replies: [reply],
+    logItems: [],
+  };
+}
+
+async function namedndHandler(
+  input: CommandInput,
+  context: CommandContext,
+): Promise<CommandDecision> {
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+  const conv = context.snapshot.conversation;
+  const args = input.args;
+
+  if (args[0]?.toLowerCase() === 'help') {
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'fun.namednd.help',
+      text: 'DND名字生成：\n.namednd [精灵/矮人/兽人] [<数量>]\n例：.namednd 精灵 3',
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  const race = args[0] ?? '精灵';
+  let count = 1;
+  if (args.length > 1) {
+    const num = Number.parseInt(args[1] ?? '', 10);
+    if (!Number.isNaN(num) && num > 0) {
+      count = Math.min(10, num);
+    }
+  }
+
+  const names = await generateDndName(race, count, context.random);
+  const text = `生成 DND 名字 (${race})：\n${names.join('\n')}`;
+
+  const reply: PreparedReply = {
+    executionId: input.executionId,
+    part: 1,
+    msgSeq: 1,
+    scene: conv.scene,
+    targetId: conv.externalId,
+    originMessageId: input.messageId,
+    templateKey: 'fun.namednd',
+    text,
+    deadline,
+  };
+
+  return {
+    results: [
+      {
+        executionId: input.executionId,
+        kind: 'fun.namednd',
+        ruleVersion: '1.0.0',
+        data: { race, count, names },
+      },
+    ],
+    updates: [],
+    replies: [reply],
+    logItems: [],
+  };
+}
+
+async function moduHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
+  const deadline = new Date(input.timestamp.getTime() + 300_000);
+  const conv = context.snapshot.conversation;
+  const args = input.args;
+  const sub = args[0]?.toLowerCase().trim() ?? 'help';
+
+  if (sub === 'help' || args.length === 0) {
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'fun.modu.help',
+      text:
+        '魔都模组网查询：\n' +
+        '.modu search <关键字> [<页码>] - 搜索关键字\n' +
+        '.modu rec <关键字> [<页码>] - 搜索编辑推荐\n' +
+        '.modu author <作者> [<页码>] - 搜索指定作者\n' +
+        '.modu luck [<页码>] - 查看编辑推荐\n' +
+        '.modu get <编号> - 查看指定详情\n' +
+        '.modu roll - 随机抽取推荐模组\n' +
+        '.modu help - 显示帮助',
+      deadline,
+    };
+    return { results: [], updates: [], replies: [reply], logItems: [] };
+  }
+
+  if (sub === 'get') {
+    const keyId = args[1]?.trim() ?? '';
+    if (!keyId) {
+      const reply: PreparedReply = {
+        executionId: input.executionId,
+        part: 1,
+        msgSeq: 1,
+        scene: conv.scene,
+        targetId: conv.externalId,
+        originMessageId: input.messageId,
+        templateKey: 'fun.modu.error',
+        text: '请提供模组编号：.modu get <编号>',
+        deadline,
+      };
+      return { results: [], updates: [], replies: [reply], logItems: [] };
+    }
+
+    const detail = await fetchCnmodsDetail(keyId);
+    const text = detail ? formatCnmodsDetail(detail) : '魔都查询出错，请稍后再试';
+
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'fun.modu.detail',
+      text,
+      deadline,
+    };
+
+    return {
+      results: [
+        {
+          executionId: input.executionId,
+          kind: 'fun.modu.detail',
+          ruleVersion: '1.0.0',
+          data: { keyId },
+        },
+      ],
+      updates: [],
+      replies: [reply],
+      logItems: [],
+    };
+  }
+
+  if (sub === 'roll') {
+    const searchRes = await fetchCnmodsSearch('', 1, true);
+    let text = '魔都查询出错，请稍后再试';
+    if (searchRes && searchRes.list.length > 0) {
+      const idx = await context.random.integer(0, searchRes.list.length - 1);
+      const chosen = searchRes.list[idx];
+      if (chosen) {
+        const detail = await fetchCnmodsDetail(String(chosen.keyId));
+        text = detail
+          ? formatCnmodsDetail(detail)
+          : `[${chosen.keyId}] ${chosen.title} - by ${chosen.article}`;
+      }
+    }
+
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'fun.modu.roll',
+      text,
+      deadline,
+    };
+
+    return {
+      results: [
+        {
+          executionId: input.executionId,
+          kind: 'fun.modu.roll',
+          ruleVersion: '1.0.0',
+          data: {},
+        },
+      ],
+      updates: [],
+      replies: [reply],
+      logItems: [],
+    };
+  }
+
+  if (sub === 'search' || sub === 'find' || sub === 'rec' || sub === 'luck' || sub === 'author') {
+    let keyword = args[1]?.trim() ?? '';
+    let page = 1;
+    let isRec = false;
+    let author = '';
+
+    if (sub === 'luck') {
+      keyword = '';
+      isRec = true;
+      const maybePage = Number.parseInt(args[1] ?? '', 10);
+      if (!Number.isNaN(maybePage) && maybePage > 0) {
+        page = maybePage;
+      }
+    } else if (sub === 'rec') {
+      isRec = true;
+      const maybePage = Number.parseInt(args[2] ?? '', 10);
+      if (!Number.isNaN(maybePage) && maybePage > 0) {
+        page = maybePage;
+      }
+    } else if (sub === 'author') {
+      author = keyword;
+      keyword = '';
+      const maybePage = Number.parseInt(args[2] ?? '', 10);
+      if (!Number.isNaN(maybePage) && maybePage > 0) {
+        page = maybePage;
+      }
+    } else {
+      const maybePage = Number.parseInt(args[2] ?? '', 10);
+      if (!Number.isNaN(maybePage) && maybePage > 0) {
+        page = maybePage;
+      }
+    }
+
+    const result = await fetchCnmodsSearch(keyword, page, isRec, author);
+    const text = result ? formatCnmodsSearchResult(page, result) : '魔都查询出错，请稍后再试';
+
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: conv.scene,
+      targetId: conv.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'fun.modu.search',
+      text,
+      deadline,
+    };
+
+    return {
+      results: [
+        {
+          executionId: input.executionId,
+          kind: 'fun.modu.search',
+          ruleVersion: '1.0.0',
+          data: { keyword, page, isRec, author },
+        },
+      ],
+      updates: [],
+      replies: [reply],
+      logItems: [],
+    };
+  }
+
+  const reply: PreparedReply = {
+    executionId: input.executionId,
+    part: 1,
+    msgSeq: 1,
+    scene: conv.scene,
+    targetId: conv.externalId,
+    originMessageId: input.messageId,
+    templateKey: 'fun.modu.help',
+    text: '未知魔都子指令，输入 .modu help 查看帮助',
+    deadline,
+  };
+  return { results: [], updates: [], replies: [reply], logItems: [] };
+}
+
 export function createDefaultCommandRegistry(): CommandRegistry {
   const registry = new DefaultCommandRegistry();
 
@@ -3984,6 +4415,61 @@ export function createDefaultCommandRegistry(): CommandRegistry {
       description: 'Search TRPG rule glossary',
     },
     findHandler,
+  );
+
+  registry.register(
+    {
+      name: 'jrrp',
+      aliases: [],
+      permission: 'all',
+      allowedWhenDisabled: false,
+      description: 'Daily luck',
+    },
+    jrrpHandler,
+  );
+
+  registry.register(
+    {
+      name: 'gugu',
+      aliases: [],
+      permission: 'all',
+      allowedWhenDisabled: false,
+      description: 'Excuses generator',
+    },
+    guguHandler,
+  );
+
+  registry.register(
+    {
+      name: 'name',
+      aliases: [],
+      permission: 'all',
+      allowedWhenDisabled: false,
+      description: 'Random name generator',
+    },
+    nameHandler,
+  );
+
+  registry.register(
+    {
+      name: 'namednd',
+      aliases: [],
+      permission: 'all',
+      allowedWhenDisabled: false,
+      description: 'Random DND name generator',
+    },
+    namedndHandler,
+  );
+
+  registry.register(
+    {
+      name: 'modu',
+      aliases: ['魔都'],
+      permission: 'all',
+      allowedWhenDisabled: false,
+      description: 'Search cnmods modules',
+    },
+    moduHandler,
   );
   return registry;
 }
