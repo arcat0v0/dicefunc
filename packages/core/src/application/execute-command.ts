@@ -1,4 +1,5 @@
 import { type CustomReplyRule, matchCustomReply } from '../domain/reply/custom-reply.js';
+import { defaultMessageCatalog } from '../messages/index.js';
 import type { VerifiedEvent } from '../ports/state-store.js';
 import {
   type CommandContext,
@@ -30,6 +31,7 @@ export class CommandExecutor {
   }
 
   async execute(event: VerifiedEvent, context: CommandContext): Promise<CommandDecision> {
+    const messages = context.messageCatalog ?? defaultMessageCatalog;
     let raw = event.text.trim();
     if (!raw) {
       return { results: [], updates: [], replies: [], logItems: [] };
@@ -166,7 +168,7 @@ export class CommandExecutor {
             targetId: event.externalId,
             originMessageId: event.messageId,
             templateKey: 'command.not_found',
-            text: `Command not found: ${cmdName}`,
+            text: messages.format('system.command_not_found', { command: cmdName }),
             deadline,
           },
         ],
@@ -193,7 +195,7 @@ export class CommandExecutor {
             targetId: event.externalId,
             originMessageId: event.messageId,
             templateKey: 'permission.denied',
-            text: 'Permission denied.',
+            text: messages.format('permission.denied'),
             deadline,
           },
         ],
@@ -216,7 +218,7 @@ export class CommandExecutor {
               targetId: event.externalId,
               originMessageId: event.messageId,
               templateKey: 'permission.dice_master_required',
-              text: 'This command requires Dice Master permission.',
+              text: messages.format('permission.dice_master_required'),
               deadline,
             },
           ],
@@ -238,7 +240,7 @@ export class CommandExecutor {
               targetId: event.externalId,
               originMessageId: event.messageId,
               templateKey: 'permission.group_host_required',
-              text: 'This command requires Group Host permission.',
+              text: messages.format('permission.group_host_required'),
               deadline,
             },
           ],

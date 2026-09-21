@@ -11,8 +11,8 @@ import {
   type CommandRegistry,
   DefaultEventHandler,
   TemplateRenderer,
-  createClassicTemplates,
   createDefaultCommandRegistry,
+  createZhCNTemplates,
 } from '@dicefunc/core';
 import type { Env } from './bindings.js';
 import { createHttpApp } from './http.js';
@@ -63,7 +63,7 @@ export function createDependencies(env: Env): WorkerDependencies {
   });
   const commandRegistry = createDefaultCommandRegistry();
   const commandExecutor = new CommandExecutor(commandRegistry);
-  const templateRenderer = new TemplateRenderer(createClassicTemplates());
+  const templateRenderer = new TemplateRenderer(createZhCNTemplates());
   const eventHandler = new DefaultEventHandler(
     stateStore,
     commandExecutor,

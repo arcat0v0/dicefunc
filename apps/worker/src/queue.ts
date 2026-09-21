@@ -7,9 +7,9 @@ import {
   type VerifiedEvent,
   buildLogEntry,
   createSealDiceTextLogFormatter,
+  defaultMessageCatalog,
 } from '@dicefunc/core';
 import type { Env } from './bindings.js';
-import { botDisplayName } from './copy.js';
 import type { WorkerDependencies } from './index.js';
 import { createDependencies } from './index.js';
 
@@ -151,7 +151,7 @@ async function deliverPendingReplies(
             row.story_log_id,
             row.story_log_sequence,
             row.story_log_part,
-            botDisplayName,
+            defaultMessageCatalog.format('bot.display_name'),
             Math.floor(Date.now() / 1000),
             row.text,
             outcome.platformMessageId,

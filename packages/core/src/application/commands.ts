@@ -13,25 +13,15 @@ import { type AstNode, collectDiceBudget, evaluateAst } from '../domain/dice/ast
 import { applyKeepDrop, rollDice } from '../domain/dice/expression.js';
 import { parseDiceExpression } from '../domain/dice/parser.js';
 import { getRandomGugu } from '../domain/fun/gugu.js';
-import { computeJrrp, formatJrrpReply } from '../domain/fun/jrrp.js';
-import {
-  fetchCnmodsDetail,
-  fetchCnmodsSearch,
-  formatCnmodsDetail,
-  formatCnmodsSearchResult,
-} from '../domain/fun/modu.js';
+import { computeJrrp } from '../domain/fun/jrrp.js';
+import { fetchCnmodsDetail, fetchCnmodsSearch } from '../domain/fun/modu.js';
 import { generateDndName, generateRandomName } from '../domain/fun/name.js';
 import {
   createHiddenRollLinkToken,
   hashHiddenRollLinkToken,
   isHiddenRollLinkToken,
 } from '../domain/hidden-roll/binding.js';
-import {
-  type Coc7CardAttributes,
-  formatCoc7CardBatch,
-  formatCoc7CardSingle,
-  generateCoc7Card,
-} from '../domain/rules/coc7/character-gen.js';
+import { type Coc7CardAttributes, generateCoc7Card } from '../domain/rules/coc7/character-gen.js';
 import { performCocCheck } from '../domain/rules/coc7/check.js';
 import { cocSuccessRank, parseCocCheckArgs } from '../domain/rules/coc7/command.js';
 import {
@@ -43,8 +33,6 @@ import { rollMadnessSymptom } from '../domain/rules/coc7/madness.js';
 import {
   type Dnd5eCardAttributes,
   type Dnd5eFreeAllocationCard,
-  formatDnd5eFreeCard,
-  formatDnd5ePresetCard,
   generateDnd5eCard,
   generateDnd5eFreeCard,
 } from '../domain/rules/dnd5e/character-gen.js';
@@ -79,6 +67,23 @@ import {
 } from '../domain/rules/dnd5e/death-saves.js';
 import { listRuleGlossary, searchRuleGlossary } from '../domain/rules/glossary.js';
 import { createArchiveAccessToken } from '../domain/story-log/log.js';
+import {
+  COC_LEVEL_LABELS,
+  HELP_BY_TOPIC,
+  HELP_OVERVIEW,
+  HELP_TOPIC_ALIASES,
+  type MessageCatalog,
+  type MessageKey,
+  type MessageValue,
+  STORY_LOG_STATUS_LABELS,
+  defaultMessageCatalog,
+  formatCnmodsDetail,
+  formatCnmodsSearchResult,
+  formatCoc7CardBatch,
+  formatCoc7CardSingle,
+  formatDnd5eFreeCard,
+  formatDnd5ePresetCard,
+} from '../messages/index.js';
 import type { Clock } from '../ports/clock.js';
 import type { RandomSource } from '../ports/random-source.js';
 import type {
@@ -141,6 +146,7 @@ export interface CommandContext {
   readonly botId: string;
   readonly hiddenRollLinks?: HiddenRollLinkReader | undefined;
   readonly publicBaseUrl?: string | undefined;
+  readonly messageCatalog?: MessageCatalog | undefined;
 }
 
 export interface CommandDecision {
@@ -214,6 +220,13 @@ export class DefaultCommandRegistry implements CommandRegistry {
   list(): readonly RegisteredCommand[] {
     return Array.from(this.commandMap.values());
   }
+}
+function formatMessage(
+  context: CommandContext,
+  key: MessageKey,
+  values?: Readonly<Record<string, MessageValue>>,
+): string {
+  return (context.messageCatalog ?? defaultMessageCatalog).format(key, values);
 }
 
 function replyOnly(
@@ -306,7 +319,7 @@ async function rollHandler(input: CommandInput, context: CommandContext): Promis
       targetId: context.snapshot.conversation.externalId,
       originMessageId: input.messageId,
       templateKey: 'dice.error',
-      text: parseResult.error ?? 'Invalid dice expression',
+      text: formatMessage(context, 'dice.invalid_expression'),
       deadline,
     };
     return {
@@ -330,7 +343,10 @@ async function rollHandler(input: CommandInput, context: CommandContext): Promis
       targetId: context.snapshot.conversation.externalId,
       originMessageId: input.messageId,
       templateKey: 'budget.exceeded',
-      text: 'Dice roll budget exceeded',
+      text: formatMessage(context, 'dice.budget_exceeded', {
+        required: totalRollsNeeded,
+        limit: context.budget.maxDiceRolls,
+      }),
       deadline,
     };
     return {
@@ -367,7 +383,15 @@ async function rollHandler(input: CommandInput, context: CommandContext): Promis
     const prefix = expr.repeat > 1 ? `#${idx + 1}: ` : '';
     const reasonStr = expr.reason ? ` ${expr.reason}` : '';
     if (expr.isCompound) {
-      textLines.push(`${prefix}${exprText} = ${row.rendered ?? ''} = ${row.total}${reasonStr}`);
+      textLines.push(
+        formatMessage(context, 'dice.roll.compound', {
+          prefix,
+          expression: exprText,
+          rendered: row.rendered ?? '',
+          total: row.total,
+          reason: reasonStr,
+        }),
+      );
     } else {
       const rollsStr = `[${row.rolls.join(', ')}]`;
       const modStr =
@@ -377,7 +401,15 @@ async function rollHandler(input: CommandInput, context: CommandContext): Promis
             : `${expr.modifier}`
           : '';
       textLines.push(
-        `${prefix}${expr.count}d${expr.faces}${modStr} = ${rollsStr} = ${row.total}${reasonStr}`,
+        formatMessage(context, 'dice.roll.simple', {
+          prefix,
+          count: expr.count,
+          faces: expr.faces,
+          modifier: modStr,
+          rolls: row.rolls.join(', '),
+          total: row.total,
+          reason: reasonStr,
+        }),
       );
     }
   }
@@ -442,11 +474,11 @@ async function hiddenRollBindingHandler(
 
   if (conversation.scene === 'c2c') {
     if (input.args[0]?.toLowerCase() === 'off') {
-      text = '请在需要解绑的群里发送 .rhbind off。';
+      text = formatMessage(context, 'dice.hidden.c2c_off');
     } else {
       const principalId = context.snapshot.principalId;
       if (!principalId) {
-        text = '当前私聊身份尚未初始化，请稍后重试。';
+        text = formatMessage(context, 'dice.hidden.c2c_uninitialized');
         templateKey = 'dice.hidden.binding.error';
       } else {
         const { token, tokenHash } = await createHiddenRollLinkToken(context.random);
@@ -459,7 +491,7 @@ async function hiddenRollBindingHandler(
           tokenHash,
           expiresAt,
         });
-        text = `绑定令牌：${token}\n请在 10 分钟内到目标群发送：.rhbind ${token}\n令牌只能使用一次。`;
+        text = formatMessage(context, 'dice.hidden.token', { token });
       }
     }
   } else {
@@ -469,12 +501,12 @@ async function hiddenRollBindingHandler(
     if (!subcommand || subcommand.toLowerCase() === 'help') {
       text = binding
         ? binding.activeMessagesEnabled
-          ? '本群暗骰私聊绑定有效。使用 .rh <表达式> 进行暗骰；使用 .rhbind off 解绑。'
-          : '本群暗骰私聊绑定有效，但本地授权状态可能未同步。可直接使用 .rh 测试实际投递；使用 .rhbind off 解绑。'
-        : '请先私聊机器人发送 .rhbind 获取一次性令牌，再在本群发送 .rhbind <令牌>。';
+          ? formatMessage(context, 'dice.hidden.bound')
+          : formatMessage(context, 'dice.hidden.bound_unsynced')
+        : formatMessage(context, 'dice.hidden.bind_help');
     } else if (subcommand.toLowerCase() === 'off') {
       if (!binding) {
-        text = '本群尚未绑定暗骰私聊。';
+        text = formatMessage(context, 'dice.hidden.not_bound');
       } else {
         updates.push({
           type: 'hidden-roll-unbind',
@@ -482,15 +514,15 @@ async function hiddenRollBindingHandler(
           expectedVersion: binding.version,
           newVersion: binding.version + 1,
         });
-        text = '已解除本群暗骰私聊绑定。';
+        text = formatMessage(context, 'dice.hidden.unbound');
       }
     } else if (binding) {
-      text = '本群已经绑定暗骰私聊；如需更换，请先发送 .rhbind off。';
+      text = formatMessage(context, 'dice.hidden.already_bound');
     } else if (!isHiddenRollLinkToken(subcommand)) {
-      text = '绑定令牌格式无效。请私聊机器人重新发送 .rhbind 获取令牌。';
+      text = formatMessage(context, 'dice.hidden.invalid_token_format');
       templateKey = 'dice.hidden.binding.error';
     } else if (!context.hiddenRollLinks || !context.snapshot.principalId) {
-      text = '当前无法验证绑定令牌，请稍后重试。';
+      text = formatMessage(context, 'dice.hidden.unavailable');
       templateKey = 'dice.hidden.binding.error';
     } else {
       const tokenHash = await hashHiddenRollLinkToken(subcommand);
@@ -500,7 +532,7 @@ async function hiddenRollBindingHandler(
         context.clock.now(),
       );
       if (!challenge) {
-        text = '绑定令牌无效、已使用或已过期。请私聊机器人重新获取。';
+        text = formatMessage(context, 'dice.hidden.invalid_token');
         templateKey = 'dice.hidden.binding.error';
       } else {
         updates.push({
@@ -513,7 +545,7 @@ async function hiddenRollBindingHandler(
           c2cPrincipalId: challenge.c2cPrincipalId,
           userOpenid: challenge.userOpenid,
         });
-        text = '暗骰私聊绑定成功。以后可以在本群使用 .rh <表达式>。';
+        text = formatMessage(context, 'dice.hidden.bind_success');
       }
     }
   }
@@ -576,7 +608,7 @@ async function hiddenRollHandler(
       targetId: conversation.externalId,
       originMessageId: input.messageId,
       templateKey: 'dice.hidden.binding_required',
-      text: '尚未绑定暗骰私聊。请先私聊机器人发送 .rhbind 获取令牌，再回本群完成绑定。',
+      text: formatMessage(context, 'dice.hidden.binding_required'),
       deadline,
     };
     return { results: [], updates: [], replies: [reply], logItems: [] };
@@ -619,7 +651,7 @@ async function hiddenRollHandler(
       targetId: conversation.externalId,
       originMessageId: input.messageId,
       templateKey: 'dice.hidden.group_sent',
-      text: '暗骰已完成，结果已私聊发送。',
+      text: formatMessage(context, 'dice.hidden.group_sent'),
       deadline,
       condition: { part: 1, status: 'sent' },
     },
@@ -631,7 +663,7 @@ async function hiddenRollHandler(
       targetId: conversation.externalId,
       originMessageId: input.messageId,
       templateKey: 'dice.hidden.group_failed',
-      text: '暗骰结果私聊发送失败，结果未在群内公开。请检查主动消息授权后重试。',
+      text: formatMessage(context, 'dice.hidden.group_failed'),
       deadline,
       condition: { part: 1, status: 'failed' },
     },
@@ -644,165 +676,6 @@ async function hiddenRollHandler(
     logItems: decision.logItems,
   };
 }
-
-const HELP_OVERVIEW = [
-  'DiceFunc 指令帮助',
-  '.help 骰点',
-  '.help COC7',
-  '.help DND5E',
-  '.help 角色卡',
-  '.help 日志',
-  '.help 牌堆',
-  '.help 娱乐',
-  '.help 查询',
-  '.help 指令',
-].join('\n');
-
-const HELP_BY_TOPIC: Readonly<Record<string, string>> = {
-  help: '帮助格式：.help [分类、指令或规则关键字]',
-  骰点: [
-    '骰点与检定：',
-    '.r [表达式] [原因]',
-    '.rh [表达式] [原因]',
-    '.ra/rc <属性或技能> [目标值]',
-    '.check 仅说明官方防伪功能未提供',
-  ].join('\n'),
-  coc7: [
-    'COC7：',
-    '.setcoc [0-5|dg|details]',
-    '.ra/rc <技能或目标值>',
-    '.sc <成功损失>/<失败损失> [SAN]',
-    '.en <技能> [当前值] [+成长表达式]',
-    '.st <属性><数值>',
-    '.coc [数量]',
-    '.ti',
-    '.li',
-  ].join('\n'),
-  dnd5e: [
-    'DND5E：',
-    '.ra/rc [优势|劣势] <属性、技能或豁免> [DC]',
-    '.ri [调整值]',
-    '.init [list|set|del|end|clr]',
-    '.hp [-伤害|+治疗|temp 数值|max 数值]',
-    '.buff [属性:数值|属性*:数值|del 属性|clr]',
-    '.ss [init|set|clr|rest|环阶变更]',
-    '.cast <环阶> [数量]',
-    '.ds [stat|优势|劣势|s±N|f±N]',
-    '.longrest',
-    '.dnd [数量]',
-    '.dndx [数量]',
-  ].join('\n'),
-  角色卡: [
-    '角色卡：',
-    '.st [show [属性]|clr|rm <属性>|<属性变更>]',
-    '.pc [new <名称>|list|save <名称>|load <名称或ID>|untag]',
-    '.nn [新名称|clr]',
-  ].join('\n'),
-  日志: [
-    '跑团日志：',
-    '.log new <名称>',
-    '.log on|pause|halt|end',
-    '.log list',
-    '.log get [名称或ID]',
-    '.log stat [名称或ID]',
-    '.log export',
-    '.log del <名称或ID>',
-  ].join('\n'),
-  牌堆: [
-    '牌堆：',
-    '.draw/.deck [牌堆] [数量]',
-    '.deck [list|keys|search <关键字>]',
-    '.deck reset [牌堆]',
-  ].join('\n'),
-  娱乐: [
-    '娱乐与生成：',
-    '.jrrp',
-    '.gugu [来源]',
-    '.who <选项...>',
-    '.ping',
-    '.name [cn|en|jp] [数量] [M|F]',
-    '.namednd [达马拉|卡林珊|莱瑟曼|受国|精灵|矮人|兽人|海族|地精] [数量]',
-  ].join('\n'),
-  查询: [
-    '查询：',
-    '.find <关键字>',
-    '.find list <分组> [页码]',
-    '.find #<条目ID>',
-    '.modu help',
-    '.userid',
-  ].join('\n'),
-  指令: [
-    '核心指令：',
-    '.r .rh .ra .rc .st .pc .set .bot .userid',
-    '.coc .setcoc .sc .en .ti .li',
-    '.dnd .dndx .ri .init .hp .buff .ss .cast .ds .longrest',
-    '.draw .deck .log .find .modu .black',
-    '.jrrp .gugu .who .ping .name .namednd',
-  ].join('\n'),
-  r: '.r [表达式] [原因]\n省略表达式时使用当前默认骰面。',
-  rh: '.rh [表达式] [原因]\n群聊暗骰需要先完成 .rhbind 绑定。',
-  rhbind: '.rhbind [on|off]\n用于管理群成员与 C2C 身份的可信暗骰绑定。',
-  ra: '.ra/rc <属性或技能> [目标值]\n未提供目标值时必须从当前角色卡读取。',
-  check: '.check 不执行检定；当前部署不提供 SealDice 官方实例防伪。',
-  st: '.st [show [属性]|clr|rm <属性>|<属性变更>]',
-  pc: '.pc [new <名称>|list|save <名称>|load <名称或ID>|untag]',
-  nn: '.nn [新名称|clr]\n修改当前本地角色卡名称，不修改 QQ 群名片。',
-  coc: '.coc [数量]\n生成一至十组 COC7 属性。',
-  dnd: '.dnd [数量]\n生成一至十组自由分配属性。',
-  dndx: '.dndx [数量]\n生成一至十组带属性名的结果。',
-  bot: '.bot on\n.bot off',
-  set: '.set <面数|coc7|dnd5e|clr>\n.set rule <coc7|dnd5e>\n.set sides <面数>',
-  setcoc: '.setcoc [0-5|dg|details]\n设置房规时同时切换到 COC7。',
-  sc: '.sc <成功损失>/<失败损失> [SAN]\n角色卡没有 SAN 时必须显式提供。',
-  en: '.en <技能> [当前值] [+成长表达式]\n省略当前值时必须从角色卡读取。',
-  hp: '.hp [-伤害|+治疗|temp 数值|max 数值]\n角色卡必须已有 HP 与 MaxHP。',
-  log: '.log new <名称>\n.log on|pause|halt|end\n.log list\n.log get [名称或ID]\n.log stat [名称或ID]\n.log export\n.log del <名称或ID>',
-  draw: '.draw/.deck [牌堆] [数量]\n未知牌堆会直接报错。',
-  deck: '.deck [牌堆] [数量]\n.deck list\n.deck keys\n.deck search <关键字>\n.deck reset <牌堆>\n内置牌堆不支持运行时 reload。',
-  init: '.init\n.init list\n.init set <名称> <先攻>\n.init del <名称>\n.init end\n.init clr\nend 推进，clr 清空。',
-  ri: '.ri [调整值]\n掷先攻并加入当前列表。',
-  buff: '.buff\n.buff 属性:数值\n.buff 属性*:数值\n.buff del 属性\n.buff clr',
-  ss: '.ss\n.ss init <一环数量>...\n.ss set <环阶> <总数> [<环阶> <总数>...]\n.ss clr|rest\n.ss <环阶>±<数量>',
-  cast: '.cast <环阶> [数量]',
-  ds: '.ds\n.ds stat\n.ds 优势\n.ds 劣势\n.ds s±N\n.ds f±N',
-  longrest: '.longrest\n恢复已有 MaxHP、法术位并清空临时 HP 和死亡豁免。',
-  jrrp: '.jrrp',
-  gugu: '.gugu [来源]',
-  name: '.name [cn|en|jp] [数量] [M|F]\n默认生成五个。',
-  namednd: '.namednd [达马拉|卡林珊|莱瑟曼|受国|精灵|矮人|兽人|海族|地精] [数量]',
-  modu: '.modu help\n.modu <关键字>',
-  find: '.find <关键字>\n.find list <分组> [页码]\n.find #<条目ID>',
-  userid: '.userid\n显示发送者标识、会话标识和场景。',
-  ti: '.ti',
-  li: '.li',
-};
-
-const HELP_TOPIC_ALIASES: Readonly<Record<string, string>> = {
-  h: 'help',
-  帮助: 'help',
-  roll: 'r',
-  rd: 'r',
-  rhd: 'rh',
-  rdh: 'rh',
-  rc: 'ra',
-  cst: 'st',
-  dst: 'st',
-  char: 'pc',
-  ch: 'pc',
-  nick: 'nn',
-  coc7: 'coc7',
-  dnd5e: 'dnd5e',
-  dnd5ex: 'dndx',
-  sancheck: 'sc',
-  spell: 'ss',
-  spellslots: 'ss',
-  rest: 'longrest',
-  initiative: 'init',
-  死亡豁免: 'ds',
-  uid: 'userid',
-  id: 'userid',
-  魔都: 'modu',
-};
 
 async function helpHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
   const fullArg = input.args.join(' ').trim();
@@ -817,10 +690,18 @@ async function helpHandler(input: CommandInput, context: CommandContext): Promis
       const { matches } = searchRuleGlossary(fullArg, 3);
       text =
         matches.length > 0
-          ? `查询「${fullArg}」的结果：\n\n${matches
-              .map((match) => `【${match.title}】\n${match.content}`)
-              .join('\n\n')}`
-          : `未找到「${fullArg}」的帮助或规则条目。`;
+          ? formatMessage(context, 'system.help.search_results', {
+              query: fullArg,
+              results: matches
+                .map((match) =>
+                  formatMessage(context, 'system.help.result_item', {
+                    title: match.title,
+                    content: match.content,
+                  }),
+                )
+                .join('\n\n'),
+            })
+          : formatMessage(context, 'system.help.not_found', { query: fullArg });
     }
   }
 
@@ -850,7 +731,7 @@ async function setHandler(input: CommandInput, context: CommandContext): Promise
       targetId: context.snapshot.conversation.externalId,
       originMessageId: input.messageId,
       templateKey: 'set.usage',
-      text: 'Usage: .set <面数> OR .set <coc/dnd> OR .set clr OR .set rule <coc7|dnd5e>',
+      text: formatMessage(context, 'set.usage'),
       deadline,
     };
     return {
@@ -874,18 +755,18 @@ async function setHandler(input: CommandInput, context: CommandContext): Promise
   if (input.args.length === 1) {
     if (firstArg === 'clr' || firstArg === 'clear') {
       changes.diceSides = 100;
-      confirmationText = 'Default dice sides reset to 100';
+      confirmationText = formatMessage(context, 'set.reset_sides');
     } else if (firstArg === 'coc' || firstArg === 'coc7') {
       changes.ruleSet = 'coc7';
-      confirmationText = 'Rule set changed to coc7';
+      confirmationText = formatMessage(context, 'set.rule', { ruleSet: 'COC7' });
     } else if (firstArg === 'dnd' || firstArg === 'dnd5e') {
       changes.ruleSet = 'dnd5e';
-      confirmationText = 'Rule set changed to dnd5e';
+      confirmationText = formatMessage(context, 'set.rule', { ruleSet: 'DND5E' });
     } else {
       const sides = Number.parseInt(firstArg, 10);
       if (!Number.isNaN(sides) && sides > 0) {
         changes.diceSides = sides;
-        confirmationText = `Default dice sides set to ${sides}`;
+        confirmationText = formatMessage(context, 'set.sides', { sides });
       } else {
         const reply: PreparedReply = {
           executionId: input.executionId,
@@ -895,7 +776,7 @@ async function setHandler(input: CommandInput, context: CommandContext): Promise
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'set.error',
-          text: `Invalid setting argument: ${firstArg}`,
+          text: formatMessage(context, 'set.invalid_argument', { argument: firstArg }),
           deadline,
         };
         return {
@@ -922,11 +803,13 @@ async function setHandler(input: CommandInput, context: CommandContext): Promise
           input,
           context,
           'set.error',
-          `不支持规则「${subValue}」。可选规则：coc7、dnd5e。`,
+          formatMessage(context, 'set.unsupported_rule', { ruleSet: subValue }),
         );
       }
       changes.ruleSet = ruleSet;
-      confirmationText = `Rule set changed to ${ruleSet}`;
+      confirmationText = formatMessage(context, 'set.rule', {
+        ruleSet: ruleSet === 'coc7' ? 'COC7' : 'DND5E',
+      });
     } else if (subKey === 'sides' || subKey === 'dicesides') {
       const sides = Number.parseInt(subValue, 10);
       if (Number.isNaN(sides) || sides <= 0) {
@@ -938,7 +821,7 @@ async function setHandler(input: CommandInput, context: CommandContext): Promise
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'set.error',
-          text: `Invalid dice sides: ${subValue}`,
+          text: formatMessage(context, 'set.invalid_sides', { value: subValue }),
           deadline,
         };
         return {
@@ -949,7 +832,7 @@ async function setHandler(input: CommandInput, context: CommandContext): Promise
         };
       }
       changes.diceSides = sides;
-      confirmationText = `Default dice sides set to ${sides}`;
+      confirmationText = formatMessage(context, 'set.sides', { sides });
     } else {
       const reply: PreparedReply = {
         executionId: input.executionId,
@@ -959,7 +842,7 @@ async function setHandler(input: CommandInput, context: CommandContext): Promise
         targetId: conv.externalId,
         originMessageId: input.messageId,
         templateKey: 'set.unknown_key',
-        text: `Unknown setting key: ${subKey}`,
+        text: formatMessage(context, 'set.unknown_key', { key: subKey ?? '' }),
         deadline,
       };
       return {
@@ -1019,7 +902,7 @@ async function botHandler(input: CommandInput, context: CommandContext): Promise
       targetId: conv.externalId,
       originMessageId: input.messageId,
       templateKey: 'bot.usage',
-      text: 'Usage: .bot on OR .bot off',
+      text: formatMessage(context, 'bot.usage'),
       deadline,
     };
     return {
@@ -1041,9 +924,7 @@ async function botHandler(input: CommandInput, context: CommandContext): Promise
     newVersion: conv.version + 1,
   };
 
-  const text = nextEnabled
-    ? 'Bot has been enabled in this conversation.'
-    : 'Bot has been disabled in this conversation.';
+  const text = formatMessage(context, nextEnabled ? 'bot.enabled' : 'bot.disabled');
 
   const reply: PreparedReply = {
     executionId: input.executionId,
@@ -1080,7 +961,11 @@ async function useridHandler(
   const conv = context.snapshot.conversation;
   const userExternalId = input.sender?.externalId ?? 'unknown';
   const conversationExternalId = conv.externalId;
-  const text = `用户标识: ${userExternalId}\n会话标识: ${conversationExternalId}\n场景: ${conv.scene}`;
+  const text = formatMessage(context, 'user.id', {
+    userId: userExternalId,
+    conversationId: conversationExternalId,
+    scene: conv.scene,
+  });
 
   const reply: PreparedReply = {
     executionId: input.executionId,
@@ -1128,7 +1013,7 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'character.sheet.unbound',
-            text: '未绑定角色卡，请先使用 .pc new <角色名> 创建或 .pc load 绑定角色卡。',
+            text: formatMessage(context, 'character.sheet.unbound'),
             deadline,
           },
         ],
@@ -1141,7 +1026,18 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
     if (requestedAttrs.length === 1 && /^\d+$/.test(requestedAttrs[0] ?? '')) {
       const threshold = Number.parseInt(requestedAttrs[0] ?? '0', 10);
       const filtered = Object.entries(sheet.attributes).filter(([_, v]) => v >= threshold);
-      text = `「${sheet.name}」的属性 (≥${threshold})：\n${filtered.length > 0 ? filtered.map(([k, v]) => `${k}: ${v}`).join(', ') : '(无符合条件属性)'}`;
+      text = formatMessage(context, 'character.attributes.filtered', {
+        name: sheet.name,
+        threshold,
+        attributes:
+          filtered.length > 0
+            ? filtered
+                .map(([name, value]) =>
+                  formatMessage(context, 'character.attributes.item', { name, value }),
+                )
+                .join(', ')
+            : formatMessage(context, 'character.attributes.none_matching'),
+      });
     } else if (requestedAttrs.length > 0) {
       const items = requestedAttrs.map((requestedName) => {
         const name = normalizeAttributeName(conv.ruleSet, requestedName);
@@ -1151,15 +1047,27 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
           calculated?.modifier ??
           sheet.attributes[name] ??
           sheet.attributes[requestedName] ??
-          '未设置';
-        return `${name}: ${value}`;
+          formatMessage(context, 'character.attributes.unset');
+        return formatMessage(context, 'character.attributes.item', { name, value });
       });
-      text = `「${sheet.name}」的属性：${items.join(', ')}`;
+      text = formatMessage(context, 'character.attributes.selected', {
+        name: sheet.name,
+        attributes: items.join(', '),
+      });
     } else {
       const entries = Object.entries(sheet.attributes);
       const attrsStr =
-        entries.length > 0 ? entries.map(([k, v]) => `${k}: ${v}`).join(', ') : '(无属性)';
-      text = `「${sheet.name}」的属性：\n${attrsStr}`;
+        entries.length > 0
+          ? entries
+              .map(([name, value]) =>
+                formatMessage(context, 'character.attributes.item', { name, value }),
+              )
+              .join(', ')
+          : formatMessage(context, 'character.attributes.none');
+      text = formatMessage(context, 'character.attributes.all', {
+        name: sheet.name,
+        attributes: attrsStr,
+      });
     }
     return {
       results: [
@@ -1202,7 +1110,7 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'character.sheet.unbound',
-            text: '未绑定角色卡，无法清空属性。',
+            text: formatMessage(context, 'character.sheet.unbound'),
             deadline,
           },
         ],
@@ -1237,7 +1145,7 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'character.attributes.clear',
-          text: `「${sheet.name}」的属性已清空。`,
+          text: formatMessage(context, 'character.attributes.clear', { name: sheet.name }),
           deadline,
         },
       ],
@@ -1259,7 +1167,7 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'character.sheet.unbound',
-            text: '未绑定角色卡，无法删除属性。',
+            text: formatMessage(context, 'character.sheet.unbound'),
             deadline,
           },
         ],
@@ -1305,7 +1213,10 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'character.attributes.remove',
-          text: `「${sheet.name}」已删除属性：${toRemove.join(', ')}。`,
+          text: formatMessage(context, 'character.attributes.remove', {
+            name: sheet.name,
+            attributes: toRemove.join(', '),
+          }),
           deadline,
         },
       ],
@@ -1370,15 +1281,29 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
       nextVal = prev + val;
       modificationDescriptions.push(
         /[dD]/.test(valStr)
-          ? `${key}: ${prev} ➯ ${nextVal} (+${valStr}=${val})`
-          : `${key}: ${nextVal}`,
+          ? formatMessage(context, 'character.attributes.change_roll', {
+              name: key,
+              previous: prev,
+              next: nextVal,
+              operator: '+',
+              expression: valStr,
+              value: val,
+            })
+          : formatMessage(context, 'character.attributes.change', { name: key, value: nextVal }),
       );
     } else if (assignment.operator === '-') {
       nextVal = prev - val;
       modificationDescriptions.push(
         /[dD]/.test(valStr)
-          ? `${key}: ${prev} ➯ ${nextVal} (-${valStr}=${val})`
-          : `${key}: ${nextVal}`,
+          ? formatMessage(context, 'character.attributes.change_roll', {
+              name: key,
+              previous: prev,
+              next: nextVal,
+              operator: '-',
+              expression: valStr,
+              value: val,
+            })
+          : formatMessage(context, 'character.attributes.change', { name: key, value: nextVal }),
       );
     }
     if (conv.ruleSet === 'dnd5e' && key === 'HP' && currentAttrs.MaxHP !== undefined) {
@@ -1448,7 +1373,7 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'character.attributes.invalid',
-          text: '未能识别属性变更，格式示例：.st 力量 60 敏捷 70 或 .st HP+2',
+          text: formatMessage(context, 'character.attributes.invalid'),
           deadline,
         },
       ],
@@ -1457,12 +1382,14 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
   }
 
   const updates: StateUpdate[] = [];
-  let sheetName = sheet?.name ?? '新角色';
+  let sheetName = sheet?.name ?? formatMessage(context, 'character.default_name');
 
   if (!sheet) {
     const senderId = input.sender?.externalId ?? 'unknown';
     const sheetId = `sheet_${context.botId}_${senderId}_${Date.now()}`;
-    sheetName = `角色_${senderId.slice(-4) || '1'}`;
+    sheetName = formatMessage(context, 'character.generated_name', {
+      suffix: senderId.slice(-4) || '1',
+    });
     updates.push({
       type: 'character-sheet',
       sheetId,
@@ -1514,8 +1441,15 @@ async function stHandler(input: CommandInput, context: CommandContext): Promise<
         templateKey: 'character.attributes.set',
         text:
           modificationDescriptions.length > 0
-            ? `「${sheetName}」的属性变化：\n${modificationDescriptions.join('\n')}`
-            : `「${sheetName}」的${conv.ruleSet.toUpperCase()}属性录入完成，本次录入了${Object.keys(changes).length}条数据`,
+            ? formatMessage(context, 'character.attributes.changed', {
+                name: sheetName,
+                changes: modificationDescriptions.join('\n'),
+              })
+            : formatMessage(context, 'character.attributes.saved', {
+                name: sheetName,
+                ruleSet: conv.ruleSet.toUpperCase(),
+                count: Object.keys(changes).length,
+              }),
         deadline,
       },
     ],
@@ -1543,7 +1477,8 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
   };
 
   if (sub === 'new') {
-    const name = args.slice(1).join(' ').trim() || '未命名角色';
+    const name =
+      args.slice(1).join(' ').trim() || formatMessage(context, 'character.create.unnamed');
     const sheetId = `sheet_${context.botId}_${input.executionId}`;
     const currentVer = context.snapshot.characterBinding?.version ?? 0;
     const updates: StateUpdate[] = [
@@ -1588,7 +1523,7 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'character.create',
-          text: `已创建并绑定新角色卡「${name}」(ID: ${sheetId})。`,
+          text: formatMessage(context, 'character.create', { name, id: sheetId }),
           deadline,
         },
       ],
@@ -1626,7 +1561,7 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'character.unbind',
-          text: '已解除当前会话的角色卡绑定。',
+          text: formatMessage(context, 'character.unbind'),
           deadline,
         },
       ],
@@ -1636,7 +1571,12 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
 
   if (sub === 'save') {
     if (!sheet) {
-      return replyOnly(input, context, 'character.sheet.unbound', '未绑定角色卡，无法保存副本。');
+      return replyOnly(
+        input,
+        context,
+        'character.sheet.unbound',
+        formatMessage(context, 'character.save.unbound'),
+      );
     }
     const saveName = args.slice(1).join(' ').trim() || sheet.name;
     const snapshotSheetId = `sheet_${context.botId}_${input.executionId}_saved`;
@@ -1672,7 +1612,10 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'character.save',
-          text: `已保存角色卡副本「${saveName}」(ID: ${snapshotSheetId})。`,
+          text: formatMessage(context, 'character.save', {
+            name: saveName,
+            id: snapshotSheetId,
+          }),
           deadline,
         },
       ],
@@ -1687,7 +1630,7 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
         input,
         context,
         'character.load.help',
-        '请指定要绑定的角色卡：.pc load <卡名或ID>',
+        formatMessage(context, 'character.load.help'),
       );
     }
     const targetSheet = resolveOwnedSheet(target);
@@ -1696,7 +1639,7 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
         input,
         context,
         'character.not_found',
-        '名下没有唯一匹配的角色卡，请先用 .pc list 查看。',
+        formatMessage(context, 'character.not_found'),
       );
     }
     const currentVer = context.snapshot.characterBinding?.version ?? 0;
@@ -1728,7 +1671,10 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'character.load',
-          text: `当前会话已绑定角色卡「${targetSheet.name}」(ID: ${targetSheet.id})。`,
+          text: formatMessage(context, 'character.load', {
+            name: targetSheet.name,
+            id: targetSheet.id,
+          }),
           deadline,
         },
       ],
@@ -1742,16 +1688,26 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
         input,
         context,
         'character.rename.help',
-        '用法：.pc rename [原卡名或ID] <新卡名>',
+        formatMessage(context, 'character.rename.help'),
       );
     }
     const targetSheet = args.length === 2 ? sheet : resolveOwnedSheet(args[1] ?? '');
     const newName = (args.length === 2 ? args[1] : args.slice(2).join(' '))?.trim() ?? '';
     if (!targetSheet || !ownedSheets.some((candidate) => candidate.id === targetSheet.id)) {
-      return replyOnly(input, context, 'character.not_found', '没有找到可改名的名下角色卡。');
+      return replyOnly(
+        input,
+        context,
+        'character.not_found',
+        formatMessage(context, 'character.rename.not_found'),
+      );
     }
     if (!newName) {
-      return replyOnly(input, context, 'character.rename.help', '新卡名不能为空。');
+      return replyOnly(
+        input,
+        context,
+        'character.rename.help',
+        formatMessage(context, 'character.rename.empty'),
+      );
     }
     const update: StateUpdate = {
       type: 'character-sheet',
@@ -1779,7 +1735,10 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'character.rename',
-          text: `角色卡「${targetSheet.name}」已改名为「${newName}」。`,
+          text: formatMessage(context, 'character.rename', {
+            oldName: targetSheet.name,
+            newName,
+          }),
           deadline,
         },
       ],
@@ -1791,7 +1750,12 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
     const target = args.slice(1).join(' ').trim();
     const targetSheet = target ? resolveOwnedSheet(target) : undefined;
     if (!targetSheet) {
-      return replyOnly(input, context, 'character.not_found', '没有找到要删除的名下角色卡。');
+      return replyOnly(
+        input,
+        context,
+        'character.not_found',
+        formatMessage(context, 'character.delete.not_found'),
+      );
     }
     const update: StateUpdate = {
       type: 'character-sheet-delete',
@@ -1818,7 +1782,7 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'character.delete',
-          text: `已删除角色卡「${targetSheet.name}」。`,
+          text: formatMessage(context, 'character.delete', { name: targetSheet.name }),
           deadline,
         },
       ],
@@ -1835,12 +1799,18 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
     }));
     const text =
       sheets.length > 0
-        ? `名下角色卡：\n${sheets
-            .map(
-              (candidate) => `${candidate.active ? '* ' : '- '}${candidate.name} (${candidate.id})`,
-            )
-            .join('\n')}`
-        : '名下还没有角色卡。使用 .pc new <角色名> 创建。';
+        ? formatMessage(context, 'character.list', {
+            items: sheets
+              .map((candidate) =>
+                formatMessage(context, 'character.list.item', {
+                  marker: candidate.active ? '* ' : '- ',
+                  name: candidate.name,
+                  id: candidate.id,
+                }),
+              )
+              .join('\n'),
+          })
+        : formatMessage(context, 'character.list.empty');
     return {
       results: [
         {
@@ -1868,12 +1838,7 @@ async function pcHandler(input: CommandInput, context: CommandContext): Promise<
     };
   }
 
-  return replyOnly(
-    input,
-    context,
-    'character.help',
-    '角色卡命令：.pc new/list/load/tag/untag/save/rename/del',
-  );
+  return replyOnly(input, context, 'character.help', formatMessage(context, 'character.help'));
 }
 
 async function nnHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
@@ -1881,7 +1846,9 @@ async function nnHandler(input: CommandInput, context: CommandContext): Promise<
   const conv = context.snapshot.conversation;
   const sheet = context.snapshot.sheet;
   const senderId = input.sender?.externalId ?? 'unknown';
-  const defaultName = input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const defaultName =
+    input.sender?.name ??
+    formatMessage(context, 'character.nn.default', { suffix: senderId.slice(-4) || '1' });
   const currentName = sheet?.name ?? defaultName;
   const sub = input.args[0]?.trim();
 
@@ -1905,7 +1872,7 @@ async function nnHandler(input: CommandInput, context: CommandContext): Promise<
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'character.nn_current',
-          text: `玩家的当前昵称为: <${currentName}>`,
+          text: formatMessage(context, 'character.nn.current', { name: currentName }),
           deadline,
         },
       ],
@@ -1914,11 +1881,7 @@ async function nnHandler(input: CommandInput, context: CommandContext): Promise<
   }
 
   if (sub.toLowerCase() === 'help') {
-    const helpText =
-      '角色名设置:\n' +
-      '.nn // 查看当前角色名\n' +
-      '.nn <角色名> // 改为指定角色名，若有卡片不会连带修改\n' +
-      '.nn clr // 重置回群名片';
+    const helpText = formatMessage(context, 'character.nn.help');
     return {
       results: [],
       updates: [],
@@ -1952,7 +1915,11 @@ async function nnHandler(input: CommandInput, context: CommandContext): Promise<
         newVersion: sheet.version + 1,
       });
     }
-    const text = `<${currentName}>(${senderId.slice(-4)})的昵称已重置为<${defaultName}>`;
+    const text = formatMessage(context, 'character.nn.reset', {
+      oldName: currentName,
+      suffix: senderId.slice(-4),
+      newName: defaultName,
+    });
     return {
       results: [
         {
@@ -2017,7 +1984,11 @@ async function nnHandler(input: CommandInput, context: CommandContext): Promise<
       newVersion: currentVer + 1,
     });
   }
-  const text = `<${currentName}>(${senderId.slice(-4)})的昵称被设定为<${newName}>`;
+  const text = formatMessage(context, 'character.nn.set', {
+    oldName: currentName,
+    suffix: senderId.slice(-4),
+    newName,
+  });
   return {
     results: [
       {
@@ -2090,9 +2061,16 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
           text:
             logs.length > 0
               ? logs
-                  .map((log) => `${log.id}: ${log.name} [${log.status}] ${log.itemCount ?? 0} 条`)
+                  .map((log) =>
+                    formatMessage(context, 'story_log.list.item', {
+                      id: log.id,
+                      name: log.name,
+                      status: log.status,
+                      count: log.itemCount ?? 0,
+                    }),
+                  )
                   .join('\n')
-              : '当前会话没有跑团日志。',
+              : formatMessage(context, 'story_log.list.empty'),
           deadline,
         },
       ],
@@ -2114,7 +2092,9 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'story_log.already_active',
-            text: `当前已有未结束的跑团日志「${activeLog.name}」，请先使用 .log end 关闭后再新建。`,
+            text: formatMessage(context, 'story_log.already_active', {
+              name: activeLog.name,
+            }),
             deadline,
           },
         ],
@@ -2156,7 +2136,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'story_log.new',
-          text: `已创建并开启跑团日志「${logName}」。`,
+          text: formatMessage(context, 'story_log.new', { name: logName }),
           deadline,
         },
       ],
@@ -2178,7 +2158,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'story_log.not_recording',
-            text: '当前会话无进行中的跑团日志。',
+            text: formatMessage(context, 'story_log.not_recording'),
             deadline,
           },
         ],
@@ -2217,7 +2197,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'story_log.pause',
-          text: `跑团日志「${activeLog.name}」已暂停记录。`,
+          text: formatMessage(context, 'story_log.pause', { name: activeLog.name }),
           deadline,
         },
       ],
@@ -2239,7 +2219,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'story_log.not_found',
-            text: '当前会话未开启跑团日志，请先使用 .log new <日志名> 创建。',
+            text: formatMessage(context, 'story_log.not_found'),
             deadline,
           },
         ],
@@ -2278,7 +2258,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'story_log.resume',
-          text: `跑团日志「${activeLog.name}」已恢复记录。`,
+          text: formatMessage(context, 'story_log.resume', { name: activeLog.name }),
           deadline,
         },
       ],
@@ -2288,7 +2268,12 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
 
   if (sub === 'halt') {
     if (!activeLog || activeLog.status === 'closed') {
-      return replyOnly(input, context, 'story_log.not_recording', '当前会话无进行中的跑团日志。');
+      return replyOnly(
+        input,
+        context,
+        'story_log.not_recording',
+        formatMessage(context, 'story_log.not_recording'),
+      );
     }
     return {
       results: [
@@ -2318,7 +2303,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'story_log.halt',
-          text: `跑团日志「${activeLog.name}」已停止记录，未发起归档。`,
+          text: formatMessage(context, 'story_log.halt', { name: activeLog.name }),
           deadline,
         },
       ],
@@ -2332,7 +2317,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
         input,
         context,
         'story_log.delete_forbidden',
-        '只有群主或骰主可以删除跑团日志。',
+        formatMessage(context, 'story_log.delete_forbidden'),
       );
     }
     if (!targetText || !latestLog) {
@@ -2340,7 +2325,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
         input,
         context,
         'story_log.not_found',
-        '未找到指定跑团日志。使用 .log list 查看日志 ID 和名称。',
+        formatMessage(context, 'story_log.delete_not_found'),
       );
     }
     if (activeLog?.id === latestLog.id || latestLog.status !== 'closed') {
@@ -2348,7 +2333,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
         input,
         context,
         'story_log.delete_active',
-        '进行中或尚未关闭的跑团日志不能删除。',
+        formatMessage(context, 'story_log.delete_active'),
       );
     }
     return {
@@ -2378,7 +2363,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'story_log.delete',
-          text: `跑团日志「${latestLog.name}」已进入删除流程，删除收敛前不可下载。`,
+          text: formatMessage(context, 'story_log.delete', { name: latestLog.name }),
           deadline,
         },
       ],
@@ -2400,7 +2385,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'story_log.not_recording',
-            text: '当前会话无进行中的跑团日志。',
+            text: formatMessage(context, 'story_log.not_recording'),
             deadline,
           },
         ],
@@ -2445,7 +2430,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'story_log.end',
-          text: `跑团日志「${activeLog.name}」已关闭，正在归档。归档完成后使用 .log export 获取下载链接。`,
+          text: formatMessage(context, 'story_log.end', { name: activeLog.name }),
           deadline,
         },
       ],
@@ -2467,7 +2452,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'story_log.export_forbidden',
-            text: '只有群主或骰主可以导出跑团日志。',
+            text: formatMessage(context, 'story_log.export_forbidden'),
             deadline,
           },
         ],
@@ -2488,7 +2473,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'story_log.not_found',
-            text: '当前群没有可导出的跑团日志。',
+            text: formatMessage(context, 'story_log.export_none'),
             deadline,
           },
         ],
@@ -2509,7 +2494,9 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'story_log.export_active',
-            text: `跑团日志「${latestLog.name}」仍在记录，请先使用 .log end 关闭。`,
+            text: formatMessage(context, 'story_log.export_active', {
+              name: latestLog.name,
+            }),
             deadline,
           },
         ],
@@ -2544,7 +2531,9 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'story_log.export_requested',
-            text: `跑团日志「${latestLog.name}」已提交归档，请稍后再次使用 .log export。`,
+            text: formatMessage(context, 'story_log.export_requested', {
+              name: latestLog.name,
+            }),
             deadline,
           },
         ],
@@ -2565,7 +2554,9 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'story_log.export_pending',
-            text: `跑团日志「${latestLog.name}」正在归档，请稍后再次使用 .log export。`,
+            text: formatMessage(context, 'story_log.export_pending', {
+              name: latestLog.name,
+            }),
             deadline,
           },
         ],
@@ -2586,7 +2577,9 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'story_log.export_unavailable',
-            text: `跑团日志「${latestLog.name}」归档暂不可用，请联系管理员。`,
+            text: formatMessage(context, 'story_log.export_unavailable', {
+              name: latestLog.name,
+            }),
             deadline,
           },
         ],
@@ -2608,7 +2601,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'story_log.export_unconfigured',
-            text: '归档已就绪，但下载地址尚未配置，请联系管理员设置 PUBLIC_BASE_URL。',
+            text: formatMessage(context, 'story_log.export_unconfigured'),
             deadline,
           },
         ],
@@ -2647,7 +2640,10 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'story_log.export',
-          text: `跑团日志「${latestLog.name}」已归档。下载链接（15 分钟内有效）：\n${downloadUrl}`,
+          text: formatMessage(context, 'story_log.export', {
+            name: latestLog.name,
+            url: downloadUrl,
+          }),
           deadline,
         },
       ],
@@ -2669,22 +2665,13 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'story_log.stat',
-            text: '当前群未开启跑团日志。使用 .log new <日志名> 开启。',
+            text: formatMessage(context, 'story_log.stat.none'),
             deadline,
           },
         ],
         logItems: [],
       };
     }
-
-    const statusMap: Record<string, string> = {
-      new: '新建',
-      recording: '记录中',
-      paused: '已暂停',
-      closed: '已关闭',
-      deleting: '删除中',
-      deleted: '已删除',
-    };
 
     return {
       results: [
@@ -2705,13 +2692,18 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'story_log.stat',
-          text: `${latestLog.status === 'closed' ? '已关闭' : (statusMap[latestLog.status] ?? latestLog.status)}跑团日志「${latestLog.name}」：共 ${latestLog.itemCount ?? 0} 条记录，其中 ${latestLog.rollCount ?? 0} 条骰点；归档：${
-            latestLog.archive?.status === 'ready'
-              ? '可下载（使用 .log get <名称或ID>）'
-              : latestLog.archive
-                ? latestLog.archive.status
-                : '无'
-          }`,
+          text: formatMessage(context, 'story_log.stat', {
+            status: STORY_LOG_STATUS_LABELS[latestLog.status] ?? latestLog.status,
+            name: latestLog.name,
+            itemCount: latestLog.itemCount ?? 0,
+            rollCount: latestLog.rollCount ?? 0,
+            archiveStatus:
+              latestLog.archive?.status === 'ready'
+                ? formatMessage(context, 'story_log.archive.ready')
+                : latestLog.archive
+                  ? latestLog.archive.status
+                  : formatMessage(context, 'story_log.archive.none'),
+          }),
           deadline,
         },
       ],
@@ -2731,7 +2723,7 @@ async function logHandler(input: CommandInput, context: CommandContext): Promise
         targetId: conv.externalId,
         originMessageId: input.messageId,
         templateKey: 'story_log.help',
-        text: '跑团日志管理：\n.log new <日志名> - 新建并开启日志\n.log on - 恢复记录\n.log pause/off - 暂停记录\n.log halt - 停止但不归档\n.log end - 关闭并归档日志\n.log list - 查看日志\n.log stat [名称或ID] - 查看统计\n.log get [名称或ID] - 获取归档下载链接\n.log del <名称或ID> - 删除已关闭日志',
+        text: formatMessage(context, 'story_log.help'),
         deadline,
       },
     ],
@@ -2747,7 +2739,7 @@ async function unsupportedCheckHandler(
     input,
     context,
     'system.check.unsupported',
-    '当前部署不提供 SealDice 官方实例防伪校验；此命令不会执行规则检定。',
+    formatMessage(context, 'system.check.unsupported'),
   );
 }
 
@@ -2764,18 +2756,12 @@ function ensureSheetRule(
     input,
     context,
     'character.rule_mismatch',
-    `当前角色卡使用 ${sheet.ruleSet}，会话规则为 ${expectedRuleSet}。请切换角色卡后重试。`,
+    formatMessage(context, 'character.rule_mismatch', {
+      sheetRule: sheet.ruleSet,
+      sessionRule: expectedRuleSet,
+    }),
   );
 }
-
-const COC_LEVEL_LABELS: Readonly<Record<string, string>> = {
-  critical: '大成功',
-  extreme: '极难成功',
-  hard: '困难成功',
-  regular: '常规成功',
-  failure: '失败',
-  fumble: '大失败',
-};
 
 const MAX_RANDOM_SOURCE: RandomSource = {
   async integer(_minInclusive: number, maxInclusive: number): Promise<number> {
@@ -2805,13 +2791,16 @@ async function checkHandler(
       input,
       context,
       'coc.check.delegate_missing',
-      '被提及的参与者没有在当前会话绑定可用角色卡。',
+      formatMessage(context, 'coc.check.delegate_missing'),
     );
   }
   const checkArgs = hasDelegateToken ? input.args.slice(1) : input.args;
   const sheet = delegateSheet ?? context.snapshot.sheet;
   const senderId = input.sender?.externalId ?? 'unknown';
-  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const actorName =
+    sheet?.name ??
+    input.sender?.name ??
+    formatMessage(context, 'character.nn.default', { suffix: senderId.slice(-4) || '1' });
 
   if (checkArgs.length === 0) {
     return replyOnly(
@@ -2819,15 +2808,20 @@ async function checkHandler(
       context,
       conv.ruleSet === 'dnd5e' ? 'dnd5e.check.help' : 'coc.check.help',
       conv.ruleSet === 'dnd5e'
-        ? '检定格式：.ra/rc <属性或技能> [难度等级]'
-        : '检定格式：.ra/rc [困难|极难] [b|p][数量] <属性或技能> [临时加值] [原因]',
+        ? formatMessage(context, 'dnd5e.check.help')
+        : formatMessage(context, 'coc.check.help'),
     );
   }
 
   if (conv.ruleSet === 'dnd5e') {
     const parsed = parseDndCheckArgs(checkArgs);
     if (!parsed.success) {
-      return replyOnly(input, context, 'dnd5e.check.invalid', `检定参数无效：${parsed.error}。`);
+      return replyOnly(
+        input,
+        context,
+        'dnd5e.check.invalid',
+        formatMessage(context, 'dnd5e.check.invalid'),
+      );
     }
     const skillName = normalizeAttributeName('dnd5e', parsed.value.name);
     const checkModifier = sheet ? resolveDndCheckModifier(sheet.attributes, skillName) : undefined;
@@ -2836,7 +2830,7 @@ async function checkHandler(
         input,
         context,
         'dnd5e.check.missing_attribute',
-        `角色卡未记录「${skillName}」所需的属性，请先录入。`,
+        formatMessage(context, 'dnd5e.check.missing_attribute', { skill: skillName }),
       );
     }
     let parsedExtra: NumericExpression | undefined;
@@ -2845,7 +2839,12 @@ async function checkHandler(
       extraSign = parsed.value.extraModifier.startsWith('-') ? -1 : 1;
       parsedExtra = parseNumericExpression(parsed.value.extraModifier.slice(1), 20);
       if (!parsedExtra) {
-        return replyOnly(input, context, 'dnd5e.check.invalid', '检定加值表达式无法解析。');
+        return replyOnly(
+          input,
+          context,
+          'dnd5e.check.invalid',
+          formatMessage(context, 'dnd5e.check.invalid_modifier'),
+        );
       }
     }
 
@@ -2872,9 +2871,35 @@ async function checkHandler(
         total,
         success,
       });
-      const diceText = rolls.length === 1 ? `1D20(${d20})` : `2D20(${rolls.join(',')})取${d20}`;
+      const diceText =
+        rolls.length === 1
+          ? formatMessage(context, 'dnd5e.check.roll', { roll: d20 })
+          : formatMessage(context, 'dnd5e.check.advantage_roll', {
+              rolls: rolls.join(','),
+              roll: d20,
+            });
       lines.push(
-        `${parsed.value.repeat > 1 ? `${index + 1}. ` : ''}${actorName}进行「${skillName}」检定：${diceText} + ${checkModifier.modifier}${extraModifier === 0 ? '' : ` ${extraModifier > 0 ? '+' : '-'} ${Math.abs(extraModifier)}`} = ${total}${parsed.value.dc === undefined ? '' : `，DC ${parsed.value.dc}，${success ? '通过' : '未通过'}`}`,
+        formatMessage(context, 'dnd5e.check.result', {
+          prefix: parsed.value.repeat > 1 ? `${index + 1}. ` : '',
+          actor: actorName,
+          skill: skillName,
+          dice: diceText,
+          modifier: checkModifier.modifier,
+          extra:
+            extraModifier === 0
+              ? ''
+              : ` ${extraModifier > 0 ? '+' : '-'} ${Math.abs(extraModifier)}`,
+          total,
+          dc:
+            parsed.value.dc === undefined
+              ? ''
+              : formatMessage(context, 'dnd5e.check.dc', {
+                  dc: parsed.value.dc,
+                  result: success
+                    ? formatMessage(context, 'dnd5e.check.passed')
+                    : formatMessage(context, 'dnd5e.check.failed'),
+                }),
+        }),
       );
     }
     const first = items[0] ?? {};
@@ -2908,7 +2933,11 @@ async function checkHandler(
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'dnd5e.check',
-          text: `${lines.join('\n')}${parsed.value.reason ? `\n原因：${parsed.value.reason}` : ''}`,
+          text: `${lines.join('\n')}${
+            parsed.value.reason
+              ? formatMessage(context, 'dnd5e.check.reason', { reason: parsed.value.reason })
+              : ''
+          }`,
           deadline,
         },
       ],
@@ -2922,7 +2951,12 @@ async function checkHandler(
   }
   const parsed = parseCocCheckArgs(checkArgs);
   if (!parsed.success) {
-    return replyOnly(input, context, 'coc.check.invalid', `检定参数无效：${parsed.error}。`);
+    return replyOnly(
+      input,
+      context,
+      'coc.check.invalid',
+      formatMessage(context, 'coc.check.invalid'),
+    );
   }
 
   const skillName = normalizeAttributeName('coc7', parsed.value.skillName);
@@ -2935,7 +2969,7 @@ async function checkHandler(
       input,
       context,
       'coc.check.missing_attribute',
-      `角色卡未记录「${skillName}」，请先录入技能值或在命令中给出目标值。`,
+      formatMessage(context, 'coc.check.missing_attribute', { skill: skillName }),
     );
   }
 
@@ -2943,6 +2977,9 @@ async function checkHandler(
   const forceRulebook =
     command === 'rc' || command === 'crc' || command === 'rch' || command === 'crch';
   const ruleId = forceRulebook ? '0' : (conv.cocRule ?? '0');
+  const ruleName =
+    resolveCocHouseRule(ruleId)?.name ??
+    formatMessage(context, 'coc.check.rule_fallback', { ruleId });
   const items: Record<string, unknown>[] = [];
   const lines: string[] = [];
 
@@ -2975,19 +3012,59 @@ async function checkHandler(
       target: { value: check.targetValue, base: baseTarget },
     };
     items.push(item);
-    const requirement =
-      parsed.value.requiredLevel > 1
-        ? `，要求${COC_LEVEL_LABELS[parsed.value.difficulty] ?? parsed.value.difficulty}`
-        : '';
+    const requirementLabel = COC_LEVEL_LABELS[parsed.value.difficulty] ?? parsed.value.difficulty;
+    const outcomeLabel = COC_LEVEL_LABELS[check.level] ?? check.level;
+    const resultDetail = success
+      ? formatMessage(context, 'coc.check.result_pass', { outcome: outcomeLabel })
+      : rank > 0
+        ? formatMessage(context, 'coc.check.result_requirement_failed', {
+            outcome: outcomeLabel,
+            requirement: requirementLabel,
+          })
+        : formatMessage(context, 'coc.check.result_failed', { outcome: outcomeLabel });
+    const rollDetail =
+      parsed.value.bonusDice === 0
+        ? formatMessage(context, 'coc.check.roll', { roll: check.rollTotal })
+        : formatMessage(context, 'coc.check.roll_bonus', {
+            kind: formatMessage(
+              context,
+              parsed.value.bonusDice > 0 ? 'coc.check.bonus' : 'coc.check.penalty',
+            ),
+            count: Math.abs(parsed.value.bonusDice),
+            rolls: check.rolls.join('、'),
+            roll: check.rollTotal,
+          });
+    const targetDetail =
+      parsed.value.modifier === 0
+        ? `${check.targetValue}`
+        : formatMessage(context, 'coc.check.target_modified', {
+            base: baseTarget,
+            operator: parsed.value.modifier > 0 ? '+' : '-',
+            modifier: Math.abs(parsed.value.modifier),
+            target: check.targetValue,
+          });
     lines.push(
-      `${parsed.value.repeat > 1 ? `${index + 1}. ` : ''}${actorName}进行「${skillName}」检定：D100=${check.rollTotal}/${check.targetValue}${requirement}，${success ? '通过' : '未通过'}（${COC_LEVEL_LABELS[check.level]}）`,
+      formatMessage(context, 'coc.check.block', {
+        prefix: parsed.value.repeat > 1 ? `${index + 1}. ` : '',
+        actor: actorName,
+        skill: skillName,
+        roll: rollDetail,
+        target: targetDetail,
+        requirement: requirementLabel,
+        result: resultDetail,
+        rule: ruleName,
+      }),
     );
   }
 
   const firstItem = items[0] ?? {};
+  const reasonText = parsed.value.reason
+    ? formatMessage(context, 'coc.check.reason', { reason: parsed.value.reason })
+    : '';
+  const summary = `${lines.join('\n\n')}${reasonText}`;
   const data =
     items.length === 1
-      ? { actor: actorName, ...firstItem, items }
+      ? { actor: actorName, ...firstItem, summary, items }
       : {
           actor: actorName,
           skill: { name: skillName },
@@ -2996,10 +3073,10 @@ async function checkHandler(
           difficulty: parsed.value.difficulty,
           requiredLevel: parsed.value.requiredLevel,
           reason: parsed.value.reason,
+          summary,
           items,
         };
   const allSucceeded = items.every((item) => item.success === true);
-  const reasonText = parsed.value.reason ? `\n原因：${parsed.value.reason}` : '';
 
   return {
     results: [
@@ -3020,7 +3097,7 @@ async function checkHandler(
         targetId: conv.externalId,
         originMessageId: input.messageId,
         templateKey: allSucceeded ? 'coc.check.success' : 'coc.check.failed',
-        text: `${lines.join('\n')}${reasonText}`,
+        text: summary,
         deadline,
       },
     ],
@@ -3054,7 +3131,7 @@ async function hiddenCheckHandler(
       input,
       context,
       'coc.hidden.binding_required',
-      '尚未建立可信私聊绑定，暗中检定未执行。',
+      formatMessage(context, 'coc.hidden.binding_required'),
     );
   }
   const decision = await checkHandler(input, context);
@@ -3088,7 +3165,7 @@ async function hiddenCheckHandler(
         targetId: conversation.externalId,
         originMessageId: input.messageId,
         templateKey: 'coc.hidden.group_sent',
-        text: '暗中检定已完成，结果只发送到绑定私聊。',
+        text: formatMessage(context, 'coc.hidden.group_sent'),
         deadline,
         condition: { part: 1, status: 'sent' },
       },
@@ -3100,7 +3177,7 @@ async function hiddenCheckHandler(
         targetId: conversation.externalId,
         originMessageId: input.messageId,
         templateKey: 'coc.hidden.group_failed',
-        text: '暗中检定的私聊发送失败，结果未在群内公开。',
+        text: formatMessage(context, 'coc.hidden.group_failed'),
         deadline,
         condition: { part: 1, status: 'failed' },
       },
@@ -3121,16 +3198,26 @@ async function opposedCheckHandler(
       input,
       context,
       'coc.opposed.help',
-      '对抗检定格式：.rav/.rcv <技能或技能值> <技能或技能值>',
+      formatMessage(context, 'coc.opposed.help'),
     );
   }
 
   const leftParsed = parseCocCheckArgs([input.args[0] ?? '']);
   const rightParsed = parseCocCheckArgs([input.args[1] ?? '']);
   if (!leftParsed.success || !rightParsed.success) {
-    return replyOnly(input, context, 'coc.opposed.invalid', '无法解析对抗双方的技能。');
+    return replyOnly(
+      input,
+      context,
+      'coc.opposed.invalid',
+      formatMessage(context, 'coc.opposed.invalid'),
+    );
   }
   const sheet = context.snapshot.sheet;
+  const senderId = input.sender?.externalId ?? 'unknown';
+  const actorName =
+    sheet?.name ??
+    input.sender?.name ??
+    formatMessage(context, 'character.nn.default', { suffix: senderId.slice(-4) || '1' });
   const leftSkill = normalizeAttributeName('coc7', leftParsed.value.skillName);
   const rightSkill = normalizeAttributeName('coc7', rightParsed.value.skillName);
   const leftTarget =
@@ -3146,7 +3233,7 @@ async function opposedCheckHandler(
       input,
       context,
       'coc.opposed.missing_attribute',
-      '角色卡缺少对抗检定所需技能，请在技能名后提供数值。',
+      formatMessage(context, 'coc.opposed.missing_attribute'),
     );
   }
 
@@ -3172,25 +3259,57 @@ async function opposedCheckHandler(
   );
   const leftRank = cocSuccessRank(leftCheck.level);
   const rightRank = cocSuccessRank(rightCheck.level);
+  const leftPass = leftRank >= leftParsed.value.requiredLevel;
+  const rightPass = rightRank >= rightParsed.value.requiredLevel;
   let winner: 'left' | 'right' | 'tie';
-  if (leftCheck.success !== rightCheck.success) {
-    winner = leftCheck.success ? 'left' : 'right';
+  let resolution: string;
+  if (leftPass !== rightPass) {
+    winner = leftPass ? 'left' : 'right';
+    resolution = formatMessage(context, 'coc.opposed.one_passed', {
+      skill: leftPass ? leftSkill : rightSkill,
+    });
   } else if (leftRank !== rightRank) {
     winner = leftRank > rightRank ? 'left' : 'right';
+    resolution = formatMessage(context, 'coc.opposed.higher_rank');
   } else if (leftTarget !== rightTarget) {
     winner = leftTarget > rightTarget ? 'left' : 'right';
+    resolution = formatMessage(context, 'coc.opposed.higher_target');
   } else if (leftCheck.rollTotal !== rightCheck.rollTotal) {
     winner = leftCheck.rollTotal < rightCheck.rollTotal ? 'left' : 'right';
+    resolution = formatMessage(context, 'coc.opposed.lower_roll');
   } else {
     winner = 'tie';
+    resolution = formatMessage(context, 'coc.opposed.exact_tie');
   }
 
+  const formatOutcome = (
+    level: keyof typeof COC_LEVEL_LABELS,
+    rank: number,
+    requiredLevel: number,
+    difficulty: string,
+  ): string => {
+    const label = COC_LEVEL_LABELS[level] ?? level;
+    const requirement =
+      difficulty in COC_LEVEL_LABELS
+        ? COC_LEVEL_LABELS[difficulty as keyof typeof COC_LEVEL_LABELS]
+        : difficulty;
+    return rank >= requiredLevel
+      ? label
+      : rank > 0
+        ? formatMessage(context, 'coc.opposed.requirement_failed', {
+            outcome: label,
+            requirement,
+          })
+        : label;
+  };
   const left = {
     skill: leftSkill,
     target: leftCheck.targetValue,
     roll: leftCheck.rollTotal,
     level: leftCheck.level,
     rank: leftRank,
+    passed: leftPass,
+    requiredLevel: leftParsed.value.requiredLevel,
   };
   const right = {
     skill: rightSkill,
@@ -3198,14 +3317,43 @@ async function opposedCheckHandler(
     roll: rightCheck.rollTotal,
     level: rightCheck.level,
     rank: rightRank,
+    passed: rightPass,
+    requiredLevel: rightParsed.value.requiredLevel,
   };
-  const winnerText = winner === 'left' ? leftSkill : winner === 'right' ? rightSkill : '平局';
-  const decision = replyOnly(
-    input,
-    context,
-    'coc.opposed',
-    `对抗检定：${leftSkill} D100=${left.roll}/${left.target}；${rightSkill} D100=${right.roll}/${right.target}。结果：${winnerText}。`,
-  );
+  const winnerText =
+    winner === 'tie'
+      ? formatMessage(context, 'coc.opposed.tie')
+      : formatMessage(context, 'coc.opposed.winner', {
+          skill: winner === 'left' ? leftSkill : rightSkill,
+        });
+  const ruleName =
+    resolveCocHouseRule(ruleId)?.name ??
+    formatMessage(context, 'coc.check.rule_fallback', { ruleId });
+  const text = formatMessage(context, 'coc.opposed.summary', {
+    actor: actorName,
+    leftSkill,
+    leftRoll: left.roll,
+    leftTarget: left.target,
+    leftOutcome: formatOutcome(
+      left.level,
+      left.rank,
+      left.requiredLevel,
+      leftParsed.value.difficulty,
+    ),
+    rightSkill,
+    rightRoll: right.roll,
+    rightTarget: right.target,
+    rightOutcome: formatOutcome(
+      right.level,
+      right.rank,
+      right.requiredLevel,
+      rightParsed.value.difficulty,
+    ),
+    winner: winnerText,
+    resolution,
+    rule: ruleName,
+  });
+  const decision = replyOnly(input, context, 'coc.opposed', text);
   return {
     ...decision,
     results: [
@@ -3213,7 +3361,7 @@ async function opposedCheckHandler(
         executionId: input.executionId,
         kind: 'coc.opposed',
         ruleVersion: '1.0.0',
-        data: { left, right, winner, ruleId },
+        data: { actor: actorName, left, right, winner, resolution, ruleId },
       },
     ],
   };
@@ -3223,7 +3371,12 @@ async function initiativeRollHandler(
   context: CommandContext,
 ): Promise<CommandDecision> {
   if (context.snapshot.conversation.ruleSet !== 'dnd5e') {
-    return replyOnly(input, context, 'dnd5e.rule_required', '先攻指令需要 DND5E 会话规则。');
+    return replyOnly(
+      input,
+      context,
+      'dnd5e.rule_required',
+      formatMessage(context, 'dnd5e.rule_required'),
+    );
   }
   const conv = context.snapshot.conversation;
   const rawEncounter = context.snapshot.encounter;
@@ -3240,11 +3393,18 @@ async function initiativeRollHandler(
         });
   const senderId = input.sender?.externalId ?? 'unknown';
   const actorName =
-    context.snapshot.sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+    context.snapshot.sheet?.name ??
+    input.sender?.name ??
+    formatMessage(context, 'character.nn.default', { suffix: senderId.slice(-4) || '1' });
   const raw = input.args.join(' ').trim();
   const segments = raw ? raw.split(/[,，]/u).map((value) => value.trim()) : [actorName];
   if (segments.some((value) => value.length === 0)) {
-    return replyOnly(input, context, 'dnd5e.initiative.invalid', '先攻项目不能为空。');
+    return replyOnly(
+      input,
+      context,
+      'dnd5e.initiative.invalid',
+      formatMessage(context, 'dnd5e.initiative.empty'),
+    );
   }
 
   const items: Array<{ name: string; initiative: number; expression: string }> = [];
@@ -3270,7 +3430,7 @@ async function initiativeRollHandler(
           input,
           context,
           'dnd5e.initiative.invalid',
-          '自定义先攻格式应为 =表达式 名称。',
+          formatMessage(context, 'dnd5e.initiative.custom_help'),
         );
       }
       initiative = await evaluateNumericExpression(parsed, context.random);
@@ -3282,7 +3442,7 @@ async function initiativeRollHandler(
           input,
           context,
           'dnd5e.initiative.invalid',
-          '先攻加值格式应为 +表达式 名称。',
+          formatMessage(context, 'dnd5e.initiative.modifier_help'),
         );
       }
       const modifier = await evaluateNumericExpression(parsed, context.random);
@@ -3313,7 +3473,12 @@ async function initiativeRollHandler(
       expression = modifier === 0 ? 'd20' : `d20${modifier > 0 ? '+' : ''}${modifier}`;
     }
     if (!name || !Number.isSafeInteger(initiative)) {
-      return replyOnly(input, context, 'dnd5e.initiative.invalid', '无法解析先攻项目。');
+      return replyOnly(
+        input,
+        context,
+        'dnd5e.initiative.invalid',
+        formatMessage(context, 'dnd5e.initiative.invalid'),
+      );
     }
     const id = name === actorName ? senderId : `actor_${name}`;
     encounter = addCombatant(encounter, { id, name, initiative });
@@ -3353,11 +3518,18 @@ async function initiativeRollHandler(
         targetId: conv.externalId,
         originMessageId: input.messageId,
         templateKey: 'dnd5e.initiative.roll',
-        text: `先攻结果：\n${orderedItems
-          .map(
-            (item, index) => `${index + 1}. ${item.name}: ${item.initiative} (${item.expression})`,
-          )
-          .join('\n')}`,
+        text: formatMessage(context, 'dnd5e.initiative.result', {
+          items: orderedItems
+            .map((item, index) =>
+              formatMessage(context, 'dnd5e.initiative.item', {
+                index: index + 1,
+                name: item.name,
+                initiative: item.initiative,
+                expression: item.expression,
+              }),
+            )
+            .join('\n'),
+        }),
         deadline: new Date(input.timestamp.getTime() + 300_000),
       },
     ],
@@ -3396,7 +3568,16 @@ async function initHandler(input: CommandInput, context: CommandContext): Promis
       newVersion: nextEnc.version,
     };
 
-    const text = `已推进至第 ${nextEnc.round} 轮，当前回合：${currentCombatant ? `「${currentCombatant.name}」(先攻: ${currentCombatant.initiative})` : '无行动者'}${roundAdvanced ? ' (下一轮/回合)' : ''}`;
+    const text = formatMessage(context, 'dnd5e.init.next', {
+      round: nextEnc.round,
+      actor: currentCombatant
+        ? formatMessage(context, 'dnd5e.init.actor', {
+            name: currentCombatant.name,
+            initiative: currentCombatant.initiative,
+          })
+        : formatMessage(context, 'dnd5e.init.no_actor'),
+      nextRound: roundAdvanced ? formatMessage(context, 'dnd5e.init.next_round') : '',
+    });
 
     return {
       results: [
@@ -3455,7 +3636,7 @@ async function initHandler(input: CommandInput, context: CommandContext): Promis
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'dnd5e.init.clear',
-          text: '先攻列表已清空。',
+          text: formatMessage(context, 'dnd5e.init.clear'),
           deadline,
         },
       ],
@@ -3477,7 +3658,7 @@ async function initHandler(input: CommandInput, context: CommandContext): Promis
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'dnd5e.init.empty',
-            text: '当前战斗轮暂无参与者。使用 .ri 或 .init 加入战斗轮。',
+            text: formatMessage(context, 'dnd5e.init.empty'),
             deadline,
           },
         ],
@@ -3486,10 +3667,21 @@ async function initHandler(input: CommandInput, context: CommandContext): Promis
     }
 
     const currentActor = currentEnc.combatants[currentEnc.turnIndex];
-    const lines = currentEnc.combatants.map(
-      (c, i) => `${i === currentEnc.turnIndex ? '👉 ' : '   '}${c.name}: ${c.initiative}`,
+    const lines = currentEnc.combatants.map((combatant, index) =>
+      formatMessage(context, 'dnd5e.init.item', {
+        marker: formatMessage(
+          context,
+          index === currentEnc.turnIndex ? 'dnd5e.init.current_marker' : 'dnd5e.init.normal_marker',
+        ),
+        name: combatant.name,
+        initiative: combatant.initiative,
+      }),
     );
-    const text = `第 ${currentEnc.round} 轮战斗 先攻列表：\n${lines.join('\n')}\n当前行动：${currentActor ? currentActor.name : '无'}`;
+    const text = formatMessage(context, 'dnd5e.init.list', {
+      round: currentEnc.round,
+      items: lines.join('\n'),
+      actor: currentActor?.name ?? formatMessage(context, 'dnd5e.init.no_current'),
+    });
 
     return {
       results: [
@@ -3521,11 +3713,21 @@ async function initHandler(input: CommandInput, context: CommandContext): Promis
   if (sub === 'del' || sub === 'rm') {
     const names = args.slice(1).filter((name) => name.length > 0);
     if (names.length === 0) {
-      return replyOnly(input, context, 'dnd5e.init.invalid', '删除格式：.init del <名称...>');
+      return replyOnly(
+        input,
+        context,
+        'dnd5e.init.invalid',
+        formatMessage(context, 'dnd5e.init.delete_help'),
+      );
     }
     const removed = currentEnc.combatants.filter((combatant) => names.includes(combatant.name));
     if (removed.length === 0) {
-      return replyOnly(input, context, 'dnd5e.init.not_found', '先攻列表中没有匹配的单位。');
+      return replyOnly(
+        input,
+        context,
+        'dnd5e.init.not_found',
+        formatMessage(context, 'dnd5e.init.not_found'),
+      );
     }
     let nextEnc = currentEnc;
     for (const combatant of removed) {
@@ -3558,7 +3760,9 @@ async function initHandler(input: CommandInput, context: CommandContext): Promis
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'dnd5e.init.remove',
-          text: `已从先攻列表移除：${removed.map((combatant) => combatant.name).join('、')}`,
+          text: formatMessage(context, 'dnd5e.init.remove', {
+            names: removed.map((combatant) => combatant.name).join('、'),
+          }),
           deadline,
         },
       ],
@@ -3574,7 +3778,7 @@ async function initHandler(input: CommandInput, context: CommandContext): Promis
         input,
         context,
         'dnd5e.init.invalid',
-        '设置先攻格式：.init set <名称> <先攻表达式>',
+        formatMessage(context, 'dnd5e.init.set_help'),
       );
     }
     const finalVal = await evaluateNumericExpression(parsedTarget, context.random);
@@ -3611,7 +3815,10 @@ async function initHandler(input: CommandInput, context: CommandContext): Promis
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'dnd5e.init.set',
-          text: `「${targetName}」先攻已设为 ${finalVal}，已加入战斗轮！`,
+          text: formatMessage(context, 'dnd5e.init.set', {
+            name: targetName,
+            initiative: finalVal,
+          }),
           deadline,
         },
       ],
@@ -3619,12 +3826,7 @@ async function initHandler(input: CommandInput, context: CommandContext): Promis
     };
   }
 
-  return replyOnly(
-    input,
-    context,
-    'dnd5e.init.help',
-    '先攻管理：.init list/end/del/set/clr；批量掷先攻使用 .ri。',
-  );
+  return replyOnly(input, context, 'dnd5e.init.help', formatMessage(context, 'dnd5e.init.help'));
 }
 
 async function hpHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
@@ -3646,7 +3848,7 @@ async function hpHandler(input: CommandInput, context: CommandContext): Promise<
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'character.sheet.unbound',
-          text: '未绑定角色卡，请先使用 .pc new <角色名> 创建角色卡。',
+          text: formatMessage(context, 'character.sheet.unbound'),
           deadline,
         },
       ],
@@ -3662,7 +3864,7 @@ async function hpHandler(input: CommandInput, context: CommandContext): Promise<
       input,
       context,
       'dnd5e.hp.missing',
-      '角色卡缺少 HP 或 MaxHP，请先录入完整生命值。',
+      formatMessage(context, 'dnd5e.hp.missing'),
     );
   }
 
@@ -3676,7 +3878,15 @@ async function hpHandler(input: CommandInput, context: CommandContext): Promise<
   const rawArg = args.join(' ').trim();
 
   if (!rawArg) {
-    const text = `「${sheet.name}」当前 HP: ${hpState.currentHp}/${hpState.maxHp}${hpState.tempHp > 0 ? ` (+${hpState.tempHp} 临时HP)` : ''}`;
+    const text = formatMessage(context, 'dnd5e.hp.show', {
+      name: sheet.name,
+      currentHp: hpState.currentHp,
+      maxHp: hpState.maxHp,
+      tempHp:
+        hpState.tempHp > 0
+          ? formatMessage(context, 'dnd5e.hp.temp_suffix', { tempHp: hpState.tempHp })
+          : '',
+    });
     return {
       results: [
         {
@@ -3726,7 +3936,20 @@ async function hpHandler(input: CommandInput, context: CommandContext): Promise<
         newVersion: sheet.version + 1,
       };
 
-      const text = `「${sheet.name}」受到 ${dmg} 点伤害${tempHpAbsorbed > 0 ? ` (临时HP吸收 ${tempHpAbsorbed})` : ''}，当前 HP: ${nextState.currentHp}/${nextState.maxHp}${nextState.tempHp > 0 ? ` (+${nextState.tempHp})` : ''}`;
+      const text = formatMessage(context, 'dnd5e.hp.damage', {
+        name: sheet.name,
+        damage: dmg,
+        absorbed:
+          tempHpAbsorbed > 0
+            ? formatMessage(context, 'dnd5e.hp.absorbed', { amount: tempHpAbsorbed })
+            : '',
+        currentHp: nextState.currentHp,
+        maxHp: nextState.maxHp,
+        tempHp:
+          nextState.tempHp > 0
+            ? formatMessage(context, 'dnd5e.hp.remaining_temp', { tempHp: nextState.tempHp })
+            : '',
+      });
 
       return {
         results: [
@@ -3784,7 +4007,12 @@ async function hpHandler(input: CommandInput, context: CommandContext): Promise<
         newVersion: sheet.version + 1,
       };
 
-      const text = `「${sheet.name}」恢复 ${effectiveHealing} 点生命，当前 HP: ${nextState.currentHp}/${nextState.maxHp}`;
+      const text = formatMessage(context, 'dnd5e.hp.heal', {
+        name: sheet.name,
+        healing: effectiveHealing,
+        currentHp: nextState.currentHp,
+        maxHp: nextState.maxHp,
+      });
 
       return {
         results: [
@@ -3850,7 +4078,10 @@ async function hpHandler(input: CommandInput, context: CommandContext): Promise<
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'dnd5e.hp.temp',
-            text: `「${sheet.name}」获得临时 HP: ${nextState.tempHp}`,
+            text: formatMessage(context, 'dnd5e.hp.temp', {
+              name: sheet.name,
+              tempHp: nextState.tempHp,
+            }),
             deadline,
           },
         ],
@@ -3896,7 +4127,10 @@ async function hpHandler(input: CommandInput, context: CommandContext): Promise<
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'dnd5e.hp.max',
-            text: `「${sheet.name}」最大生命值已设为 ${nextState.maxHp}`,
+            text: formatMessage(context, 'dnd5e.hp.max', {
+              name: sheet.name,
+              maxHp: nextState.maxHp,
+            }),
             deadline,
           },
         ],
@@ -3917,7 +4151,7 @@ async function hpHandler(input: CommandInput, context: CommandContext): Promise<
         targetId: conv.externalId,
         originMessageId: input.messageId,
         templateKey: 'dnd5e.hp.help',
-        text: 'HP 管理命令：\n.hp - 查看生命值\n.hp -<伤害> - 扣除生命值\n.hp +<治疗> - 恢复生命值\n.hp temp <数值> - 设定临时生命值\n.hp max <数值> - 设定最大生命值',
+        text: formatMessage(context, 'dnd5e.hp.help'),
         deadline,
       },
     ],
@@ -3928,7 +4162,12 @@ async function hpHandler(input: CommandInput, context: CommandContext): Promise<
 async function buffHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
   const sheet = context.snapshot.sheet;
   if (!sheet || sheet.ruleSet !== 'dnd5e') {
-    return replyOnly(input, context, 'dnd5e.buff.card_required', '临时加值需要绑定 DND5E 角色卡。');
+    return replyOnly(
+      input,
+      context,
+      'dnd5e.buff.card_required',
+      formatMessage(context, 'dnd5e.buff.card_required'),
+    );
   }
   const sub = input.args[0]?.toLowerCase();
   const currentBuffs = Object.entries(sheet.attributes).filter(([name]) =>
@@ -3941,8 +4180,18 @@ async function buffHandler(input: CommandInput, context: CommandContext): Promis
       context,
       'dnd5e.buff.show',
       currentBuffs.length > 0
-        ? `「${sheet.name}」的临时加值：${currentBuffs.map(([name, value]) => `${name.slice(5)}:${value}`).join('，')}`
-        : `「${sheet.name}」当前没有临时加值。`,
+        ? formatMessage(context, 'dnd5e.buff.show', {
+            name: sheet.name,
+            items: currentBuffs
+              .map(([name, value]) =>
+                formatMessage(context, 'dnd5e.buff.item', {
+                  name: name.slice(5),
+                  value,
+                }),
+              )
+              .join('，'),
+          })
+        : formatMessage(context, 'dnd5e.buff.empty', { name: sheet.name }),
     );
     return {
       ...decision,
@@ -4019,7 +4268,7 @@ async function buffHandler(input: CommandInput, context: CommandContext): Promis
       input,
       context,
       'dnd5e.buff.invalid',
-      '临时加值格式：.buff 属性:数值、.buff 属性*:数值、.buff del 属性、.buff clr',
+      formatMessage(context, 'dnd5e.buff.invalid'),
     );
   }
   const update: StateUpdate = {
@@ -4029,11 +4278,27 @@ async function buffHandler(input: CommandInput, context: CommandContext): Promis
     changes: { attributes: nextAttrs },
     newVersion: sheet.version + 1,
   };
+  const changedEntries = Object.entries(changed)
+    .map(([name, value]) => [name.slice('Buff_'.length), value] as const)
+    .sort(([left], [right]) => left.localeCompare(right, 'zh-CN'));
+  const assignedLines = changedEntries
+    .filter((entry): entry is readonly [string, number] => entry[1] !== null)
+    .map(([name, value]) => formatMessage(context, 'dnd5e.buff.assignment', { name, value }));
+  const removedNames = changedEntries.filter(([, value]) => value === null).map(([name]) => name);
+  const details = [
+    ...assignedLines,
+    ...(removedNames.length > 0
+      ? [formatMessage(context, 'dnd5e.buff.removed', { names: removedNames.join('、') })]
+      : []),
+  ];
   const decision = replyOnly(
     input,
     context,
     'dnd5e.buff.update',
-    `「${sheet.name}」的临时加值已更新。`,
+    formatMessage(context, 'dnd5e.buff.update', {
+      name: sheet.name,
+      details: details.join('\n'),
+    }),
   );
   return {
     ...decision,
@@ -4060,7 +4325,7 @@ async function spellSlotHandler(
       input,
       context,
       'character.sheet.unbound',
-      '未绑定角色卡，请先创建或绑定角色卡。',
+      formatMessage(context, 'character.sheet.unbound'),
     );
   }
 
@@ -4075,16 +4340,23 @@ async function spellSlotHandler(
   const args = input.args;
   const sub = args[0]?.toLowerCase();
   if (!sub || sub === 'show' || sub === 'list') {
-    const lines = Object.values(slots).map(
-      (slot) => `${slot.level}环: ${slot.total - slot.used}/${slot.total}`,
+    const lines = Object.values(slots).map((slot) =>
+      formatMessage(context, 'dnd5e.spell.slot', {
+        level: slot.level,
+        remaining: slot.total - slot.used,
+        total: slot.total,
+      }),
     );
     const decision = replyOnly(
       input,
       context,
       'dnd5e.spell.show',
       lines.length > 0
-        ? `「${sheet.name}」法术位状态：\n${lines.join('  ')}`
-        : `「${sheet.name}」尚未设置法术位。`,
+        ? formatMessage(context, 'dnd5e.spell.show', {
+            name: sheet.name,
+            slots: lines.join('  '),
+          })
+        : formatMessage(context, 'dnd5e.spell.empty', { name: sheet.name }),
     );
     return {
       ...decision,
@@ -4121,14 +4393,23 @@ async function spellSlotHandler(
         input,
         context,
         'dnd5e.spell.insufficient',
-        `无法消耗法术位；当前 ${level || '?'} 环可用 ${slot ? slot.total - slot.used : 0} 个。`,
+        formatMessage(context, 'dnd5e.spell.insufficient', {
+          level: level || '?',
+          remaining: slot ? slot.total - slot.used : 0,
+        }),
       );
     }
     nextAttrs[`法术位_${level}_已用`] = slot.used + count;
     const remaining = slot.total - slot.used - count;
     kind = 'dnd5e.spell.use';
     data = { level, count, remaining };
-    text = `「${sheet.name}」消耗 ${count} 个 ${level} 环法术位，剩余 ${remaining}/${slot.total}。`;
+    text = formatMessage(context, 'dnd5e.spell.use', {
+      name: sheet.name,
+      count,
+      level,
+      remaining,
+      total: slot.total,
+    });
   } else if (sub === 'init') {
     const totals = args.slice(1).map((value) => Number.parseInt(value, 10));
     if (
@@ -4140,7 +4421,7 @@ async function spellSlotHandler(
         input,
         context,
         'dnd5e.spell.invalid',
-        '初始化格式：.ss init <一环数量> <二环数量> ...',
+        formatMessage(context, 'dnd5e.spell.init_help'),
       );
     }
     totals.forEach((total, index) => {
@@ -4149,7 +4430,14 @@ async function spellSlotHandler(
     });
     kind = 'dnd5e.spell.init';
     data = { totals };
-    text = `「${sheet.name}」已初始化 ${totals.length} 个环阶的法术位。`;
+    text = formatMessage(context, 'dnd5e.spell.init', {
+      name: sheet.name,
+      slots: totals
+        .map((total, index) =>
+          formatMessage(context, 'dnd5e.spell.full_slot', { level: index + 1, total }),
+        )
+        .join('，'),
+    });
   } else if (sub === 'set') {
     const raw = args.slice(1).join(' ');
     const matches = Array.from(raw.matchAll(/(\d+)(?:环|[cC])?\s*(\d+)|[lL][vV](\d+)\s+(\d+)/gu));
@@ -4164,25 +4452,50 @@ async function spellSlotHandler(
       }
     }
     if (updates.length === 0) {
-      return replyOnly(input, context, 'dnd5e.spell.invalid', '设置格式：.ss set 1环4 2环3');
+      return replyOnly(
+        input,
+        context,
+        'dnd5e.spell.invalid',
+        formatMessage(context, 'dnd5e.spell.set_help'),
+      );
     }
     kind = 'dnd5e.spell.set';
     data = { updates };
-    text = `「${sheet.name}」已设置法术位：${updates.map((item) => `${item.level}环${item.total}`).join('，')}。`;
+    text = formatMessage(context, 'dnd5e.spell.set', {
+      name: sheet.name,
+      slots: updates
+        .map((item) =>
+          formatMessage(context, 'dnd5e.spell.set_slot', {
+            level: item.level,
+            total: item.total,
+          }),
+        )
+        .join('，'),
+    });
   } else if (sub === 'clr' || sub === 'clear') {
     for (let level = 1; level <= 9; level += 1) {
       delete nextAttrs[`法术位_${level}`];
       delete nextAttrs[`法术位_${level}_已用`];
     }
     kind = 'dnd5e.spell.clear';
-    text = `「${sheet.name}」的法术位记录已清除。`;
+    text = formatMessage(context, 'dnd5e.spell.clear', { name: sheet.name });
   } else if (sub === 'rest') {
     for (const slot of Object.values(slots)) {
       nextAttrs[`法术位_${slot.level}_已用`] = 0;
     }
     kind = 'dnd5e.spell.rest';
     data = { restoredLevels: Object.keys(slots).map(Number) };
-    text = `「${sheet.name}」的法术位已恢复。`;
+    text = formatMessage(context, 'dnd5e.spell.rest', {
+      name: sheet.name,
+      slots: Object.values(slots)
+        .map((slot) =>
+          formatMessage(context, 'dnd5e.spell.full_slot', {
+            level: slot.level,
+            total: slot.total,
+          }),
+        )
+        .join('，'),
+    });
   } else {
     const raw = args.join(' ');
     const matches = Array.from(
@@ -4195,11 +4508,21 @@ async function spellSlotHandler(
       const amount = Number.parseInt(match[3] ?? match[6] ?? '', 10);
       const slot = slots[level];
       if (!slot || amount < 0) {
-        return replyOnly(input, context, 'dnd5e.spell.invalid', '法术位环阶或变更数量无效。');
+        return replyOnly(
+          input,
+          context,
+          'dnd5e.spell.invalid',
+          formatMessage(context, 'dnd5e.spell.invalid_change'),
+        );
       }
       const used = operator === '-' ? slot.used + amount : Math.max(0, slot.used - amount);
       if (used > slot.total) {
-        return replyOnly(input, context, 'dnd5e.spell.insufficient', `${level} 环法术位不足。`);
+        return replyOnly(
+          input,
+          context,
+          'dnd5e.spell.insufficient',
+          formatMessage(context, 'dnd5e.spell.level_insufficient', { level }),
+        );
       }
       nextAttrs[`法术位_${level}_已用`] = used;
       changes.push({
@@ -4213,11 +4536,24 @@ async function spellSlotHandler(
         input,
         context,
         'dnd5e.spell.help',
-        '法术位命令：.ss init/set/clr/rest，或 .ss 3环-1；施法可用 .cast。',
+        formatMessage(context, 'dnd5e.spell.help'),
       );
     }
     data = { changes };
-    text = `「${sheet.name}」的法术位已变更。`;
+    text = formatMessage(context, 'dnd5e.spell.changed', {
+      name: sheet.name,
+      changes: changes
+        .map((change) => {
+          const total = slots[change.level]?.total ?? change.remaining;
+          return formatMessage(context, 'dnd5e.spell.change', {
+            level: change.level,
+            delta: `${change.delta > 0 ? '+' : ''}${change.delta}`,
+            remaining: change.remaining,
+            total,
+          });
+        })
+        .join('；'),
+    });
   }
 
   const update: StateUpdate = {
@@ -4267,7 +4603,7 @@ async function longRestHandler(
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'character.sheet.unbound',
-          text: '未绑定角色卡，无法长休。',
+          text: formatMessage(context, 'dnd5e.longrest.unbound'),
           deadline,
         },
       ],
@@ -4281,7 +4617,7 @@ async function longRestHandler(
       input,
       context,
       'dnd5e.longrest.missing_max_hp',
-      '角色卡未记录 MaxHP，无法恢复生命值。',
+      formatMessage(context, 'dnd5e.longrest.missing_max_hp'),
     );
   }
   const nextAttrs: Record<string, number> = {
@@ -4325,7 +4661,10 @@ async function longRestHandler(
         targetId: conv.externalId,
         originMessageId: input.messageId,
         templateKey: 'dnd5e.longrest',
-        text: `「${sheet.name}」完成了长休：生命值完全恢复 (${maxHp}/${maxHp})，临时生命值已清空，所有法术位已完全恢复！`,
+        text: formatMessage(context, 'dnd5e.longrest', {
+          name: sheet.name,
+          maxHp,
+        }),
         deadline,
       },
     ],
@@ -4337,7 +4676,10 @@ async function drawHandler(input: CommandInput, context: CommandContext): Promis
   const conv = context.snapshot.conversation;
   const sheet = context.snapshot.sheet;
   const senderId = input.sender?.externalId ?? 'unknown';
-  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const actorName =
+    sheet?.name ??
+    input.sender?.name ??
+    formatMessage(context, 'character.nn.default', { suffix: senderId.slice(-4) || '1' });
   const args = input.args;
 
   let deckId = 'tarot';
@@ -4372,7 +4714,7 @@ async function drawHandler(input: CommandInput, context: CommandContext): Promis
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'deck.not_found',
-          text: `未找到牌堆「${deckId}」。使用 .deck list 查看可用牌堆。`,
+          text: formatMessage(context, 'deck.not_found', { deck: deckId }),
           deadline,
         },
       ],
@@ -4407,8 +4749,15 @@ async function drawHandler(input: CommandInput, context: CommandContext): Promis
     newVersion: nextSession.version,
   };
 
-  const drawnLines = drawn.map((c) => `🎴 ${c.text}`).join('\n');
-  const text = `「${actorName}」从「${deck.name}」中抽取了：\n${drawnLines}\n(剩余: ${nextSession.remaining.length} 张)`;
+  const drawnLines = drawn
+    .map((card) => formatMessage(context, 'deck.draw.item', { card: card.text }))
+    .join('\n');
+  const text = formatMessage(context, 'deck.draw', {
+    actor: actorName,
+    deck: deck.name,
+    cards: drawnLines,
+    remaining: nextSession.remaining.length,
+  });
 
   return {
     results: [
@@ -4450,8 +4799,14 @@ async function deckHandler(input: CommandInput, context: CommandContext): Promis
 
   if (sub === 'list' || sub === 'keys') {
     const decks = listBuiltinDecks();
-    const lines = decks.map((d) => `• ${d.id}: ${d.name} (${d.cards.length} 张)`);
-    const text = `可用牌堆列表：\n${lines.join('\n')}\n使用 .draw <牌堆名> [张数] 进行抽牌。`;
+    const lines = decks.map((deck) =>
+      formatMessage(context, 'deck.list.item', {
+        id: deck.id,
+        name: deck.name,
+        count: deck.cards.length,
+      }),
+    );
+    const text = formatMessage(context, 'deck.list', { decks: lines.join('\n') });
 
     return {
       results: [
@@ -4483,7 +4838,12 @@ async function deckHandler(input: CommandInput, context: CommandContext): Promis
   if (sub === 'search') {
     const query = args.slice(1).join(' ').trim().toLowerCase();
     if (!query) {
-      return replyOnly(input, context, 'deck.search_invalid', '请提供牌堆或卡牌关键字。');
+      return replyOnly(
+        input,
+        context,
+        'deck.search_invalid',
+        formatMessage(context, 'deck.search_invalid'),
+      );
     }
     const matches: Array<{
       deckId: string;
@@ -4534,11 +4894,18 @@ async function deckHandler(input: CommandInput, context: CommandContext): Promis
               ? matches
                   .map((match) =>
                     match.text !== undefined
-                      ? `${match.deckId}/${match.cardId}: ${match.text}`
-                      : `${match.deckId}: ${match.deckName}`,
+                      ? formatMessage(context, 'deck.search.card', {
+                          deckId: match.deckId,
+                          cardId: match.cardId ?? '',
+                          text: match.text,
+                        })
+                      : formatMessage(context, 'deck.search.deck', {
+                          deckId: match.deckId,
+                          deckName: match.deckName,
+                        }),
                   )
                   .join('\n')
-              : `没有找到与「${query}」匹配的牌堆或卡牌。`,
+              : formatMessage(context, 'deck.search.empty', { query }),
           deadline,
         },
       ],
@@ -4551,7 +4918,7 @@ async function deckHandler(input: CommandInput, context: CommandContext): Promis
       input,
       context,
       'deck.reload_unsupported',
-      '当前部署使用编译期内置牌堆，不支持聊天侧重新加载资源。',
+      formatMessage(context, 'deck.reload_unsupported'),
     );
   }
 
@@ -4571,7 +4938,7 @@ async function deckHandler(input: CommandInput, context: CommandContext): Promis
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'deck.not_found',
-            text: `未找到牌堆「${deckId}」。使用 .deck list 查看可用牌堆。`,
+            text: formatMessage(context, 'deck.not_found', { deck: deckId }),
             deadline,
           },
         ],
@@ -4612,7 +4979,10 @@ async function deckHandler(input: CommandInput, context: CommandContext): Promis
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'deck.reset',
-          text: `「${deck.name}」牌堆已重置洗牌，共有 ${deck.cards.length} 张卡牌。`,
+          text: formatMessage(context, 'deck.reset', {
+            deck: deck.name,
+            count: deck.cards.length,
+          }),
           deadline,
         },
       ],
@@ -4627,7 +4997,11 @@ async function cocHandler(input: CommandInput, context: CommandContext): Promise
   const conv = context.snapshot.conversation;
   const sheet = context.snapshot.sheet;
   const actorName =
-    sheet?.name ?? input.sender?.name ?? `用户_${input.sender?.externalId.slice(-4) || '1'}`;
+    sheet?.name ??
+    input.sender?.name ??
+    formatMessage(context, 'character.nn.default', {
+      suffix: input.sender?.externalId.slice(-4) || '1',
+    });
   const rawCount = input.args[0];
   let count = 1;
   if (rawCount !== undefined && rawCount !== '') {
@@ -4645,7 +5019,7 @@ async function cocHandler(input: CommandInput, context: CommandContext): Promise
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'coc.help',
-            text: 'COC制卡指令:\n.coc [<数量>] // 制卡指令，返回<数量>组人物属性',
+            text: formatMessage(context, 'coc.card.help'),
             deadline,
           },
         ],
@@ -4663,8 +5037,8 @@ async function cocHandler(input: CommandInput, context: CommandContext): Promise
   const firstCard = cards[0];
   const text =
     count === 1 && firstCard
-      ? formatCoc7CardSingle(actorName, firstCard)
-      : formatCoc7CardBatch(actorName, cards);
+      ? formatCoc7CardSingle(context.messageCatalog ?? defaultMessageCatalog, actorName, firstCard)
+      : formatCoc7CardBatch(context.messageCatalog ?? defaultMessageCatalog, actorName, cards);
 
   return {
     results: [
@@ -4698,7 +5072,11 @@ async function dndHandler(input: CommandInput, context: CommandContext): Promise
   const conv = context.snapshot.conversation;
   const sheet = context.snapshot.sheet;
   const actorName =
-    sheet?.name ?? input.sender?.name ?? `用户_${input.sender?.externalId.slice(-4) || '1'}`;
+    sheet?.name ??
+    input.sender?.name ??
+    formatMessage(context, 'character.nn.default', {
+      suffix: input.sender?.externalId.slice(-4) || '1',
+    });
   const isModePreset =
     input.commandName.toLowerCase().startsWith('dndx') ||
     input.commandName.toLowerCase().startsWith('dnd5ex');
@@ -4719,7 +5097,7 @@ async function dndHandler(input: CommandInput, context: CommandContext): Promise
             targetId: conv.externalId,
             originMessageId: input.messageId,
             templateKey: 'dnd.help',
-            text: 'DND5E制卡指令:\n.dnd [<数量>] // 制卡指令，返回<数量>组人物属性，最高为10次\n.dndx [<数量>] // 制卡指令，但带有属性名，最高为10次',
+            text: formatMessage(context, 'dnd.card.help'),
             deadline,
           },
         ],
@@ -4735,13 +5113,13 @@ async function dndHandler(input: CommandInput, context: CommandContext): Promise
     for (let i = 0; i < count; i++) {
       cards.push(await generateDnd5eCard(context.random));
     }
-    text = formatDnd5ePresetCard(actorName, cards);
+    text = formatDnd5ePresetCard(context.messageCatalog ?? defaultMessageCatalog, actorName, cards);
   } else {
     const cards: Dnd5eFreeAllocationCard[] = [];
     for (let i = 0; i < count; i++) {
       cards.push(await generateDnd5eFreeCard(context.random));
     }
-    text = formatDnd5eFreeCard(actorName, cards);
+    text = formatDnd5eFreeCard(context.messageCatalog ?? defaultMessageCatalog, actorName, cards);
   }
 
   return {
@@ -4775,15 +5153,13 @@ async function scHandler(input: CommandInput, context: CommandContext): Promise<
   const conv = context.snapshot.conversation;
   const sheet = context.snapshot.sheet;
   const senderId = input.sender?.externalId ?? 'unknown';
-  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const actorName =
+    sheet?.name ??
+    input.sender?.name ??
+    formatMessage(context, 'character.nn.default', { suffix: senderId.slice(-4) || '1' });
 
   if (input.args.length === 0 || input.args[0]?.toLowerCase() === 'help') {
-    return replyOnly(
-      input,
-      context,
-      'coc.sc.help',
-      '理智检定格式：.sc [b|p][数量] [判定表达式] <成功损失>/<失败损失> [SAN] [--half] [--cap=上限]',
-    );
+    return replyOnly(input, context, 'coc.sc.help', formatMessage(context, 'coc.sc.help'));
   }
   const mismatch = ensureSheetRule(input, context, 'coc7');
   if (mismatch) {
@@ -4831,7 +5207,12 @@ async function scHandler(input: CommandInput, context: CommandContext): Promise<
   }
   const lossExpression = tokens.shift();
   if (!lossExpression) {
-    return replyOnly(input, context, 'coc.sc.invalid', '缺少理智损失表达式。');
+    return replyOnly(
+      input,
+      context,
+      'coc.sc.invalid',
+      formatMessage(context, 'coc.sc.missing_loss'),
+    );
   }
   const customSanToken = tokens.find((token) => /^\d+$/u.test(token));
   const customSan = customSanToken !== undefined ? Number.parseInt(customSanToken, 10) : undefined;
@@ -4842,7 +5223,7 @@ async function scHandler(input: CommandInput, context: CommandContext): Promise<
       input,
       context,
       'coc.sc.missing_san',
-      '角色卡未记录理智值，请先录入 SAN，或在命令末尾提供明确数值。',
+      formatMessage(context, 'coc.sc.missing_san'),
     );
   }
 
@@ -4853,7 +5234,12 @@ async function scHandler(input: CommandInput, context: CommandContext): Promise<
   const parsedSuccessLoss = parseNumericExpression(successLossExpression, 6);
   const parsedFailureLoss = parseNumericExpression(failureLossExpression, 6);
   if (!parsedSuccessLoss || !parsedFailureLoss) {
-    return replyOnly(input, context, 'coc.sc.invalid', '理智损失表达式无法解析。');
+    return replyOnly(
+      input,
+      context,
+      'coc.sc.invalid',
+      formatMessage(context, 'coc.sc.invalid_loss'),
+    );
   }
 
   const ruleId = conv.cocRule ?? '0';
@@ -4863,11 +5249,21 @@ async function scHandler(input: CommandInput, context: CommandContext): Promise<
   if (checkExpression) {
     const parsedCheck = parseNumericExpression(checkExpression, 100);
     if (!parsedCheck) {
-      return replyOnly(input, context, 'coc.sc.invalid', '判定表达式无法解析。');
+      return replyOnly(
+        input,
+        context,
+        'coc.sc.invalid',
+        formatMessage(context, 'coc.sc.invalid_check'),
+      );
     }
     rollTotal = await evaluateNumericExpression(parsedCheck, context.random);
     if (!Number.isInteger(rollTotal) || rollTotal < 1 || rollTotal > 100) {
-      return replyOnly(input, context, 'coc.sc.invalid', '判定结果必须在 1 到 100 之间。');
+      return replyOnly(
+        input,
+        context,
+        'coc.sc.invalid',
+        formatMessage(context, 'coc.sc.invalid_roll'),
+      );
     }
     rolls = [rollTotal];
     successRank = resultCheckBase(ruleId, rollTotal, currentSan).successRank;
@@ -4932,14 +5328,80 @@ async function scHandler(input: CommandInput, context: CommandContext): Promise<
 
   let madness = '';
   if (sanNew === 0) {
-    madness = '\n理智归零，角色进入永久疯狂。';
+    madness = formatMessage(context, 'coc.sc.permanent_madness');
   } else if (indefiniteMadness) {
-    madness = `\n当日累计损失 ${dailyLoss} 点，达到五分之一阈值 ${dailyThreshold}，进入不定性疯狂。`;
+    madness = formatMessage(context, 'coc.sc.indefinite_madness', {
+      loss: dailyLoss,
+      threshold: dailyThreshold,
+    });
   } else if (sanLoss >= 5) {
-    madness = '\n单次损失至少 5 点，需要进行智力检定判断是否进入临时疯狂。';
+    madness = formatMessage(context, 'coc.sc.temporary_madness');
   }
   const chosenText = success ? successLossExpression : failureLossExpression;
-  const text = `${actorName}的理智检定：D100=${rollTotal}/${currentSan}，${success ? '通过' : '未通过'}；损失 ${chosenText}=${originalSanLoss}${half || cap !== undefined ? `，调整为 ${sanLoss}` : ''}；SAN ${currentSan}→${sanNew}。${madness}`;
+  const outcomeLabel =
+    successRank >= 4
+      ? COC_LEVEL_LABELS.critical
+      : successRank === 3
+        ? COC_LEVEL_LABELS.extreme
+        : successRank === 2
+          ? COC_LEVEL_LABELS.hard
+          : successRank === 1
+            ? COC_LEVEL_LABELS.regular
+            : successRank === -2
+              ? COC_LEVEL_LABELS.fumble
+              : COC_LEVEL_LABELS.failure;
+  const rollDetail =
+    bonusDice === 0
+      ? checkExpression
+        ? formatMessage(context, 'coc.sc.check_expression', {
+            expression: checkExpression,
+            roll: rollTotal,
+          })
+        : formatMessage(context, 'coc.check.roll', { roll: rollTotal })
+      : formatMessage(context, 'coc.check.roll_bonus', {
+          kind: formatMessage(context, bonusDice > 0 ? 'coc.check.bonus' : 'coc.check.penalty'),
+          count: Math.abs(bonusDice),
+          rolls: rolls.join('、'),
+          roll: rollTotal,
+        });
+  const adjustments = [
+    ...(half ? [formatMessage(context, 'coc.sc.adjustment.half')] : []),
+    ...(cap !== undefined ? [formatMessage(context, 'coc.sc.adjustment.cap', { cap })] : []),
+  ];
+  const lossDetail =
+    adjustments.length > 0
+      ? formatMessage(context, 'coc.sc.loss_adjusted', {
+          expression: chosenText,
+          original: originalSanLoss,
+          loss: sanLoss,
+          adjustments: adjustments.join('、'),
+        })
+      : formatMessage(context, 'coc.sc.loss', {
+          expression: chosenText,
+          loss: originalSanLoss,
+        });
+  const ruleName =
+    resolveCocHouseRule(ruleId)?.name ??
+    formatMessage(context, 'coc.check.rule_fallback', { ruleId });
+  const text = formatMessage(context, 'coc.sc.summary', {
+    actor: actorName,
+    roll: rollDetail,
+    target: currentSan,
+    outcome: outcomeLabel,
+    result: formatMessage(context, success ? 'coc.result.passed' : 'coc.result.failed'),
+    loss: lossDetail,
+    oldSan: currentSan,
+    newSan: sanNew,
+    persistence: sheet ? '' : formatMessage(context, 'coc.sc.not_persisted'),
+    daily: sheet
+      ? formatMessage(context, 'coc.sc.daily', {
+          loss: dailyLoss,
+          threshold: dailyThreshold,
+        })
+      : '',
+    rule: ruleName,
+    madness: madness ? formatMessage(context, 'coc.sc.madness', { message: madness }) : '',
+  });
 
   const result: CommandResult = {
     executionId: input.executionId,
@@ -4961,6 +5423,8 @@ async function scHandler(input: CommandInput, context: CommandContext): Promise<
       dailyLoss,
       dailyThreshold,
       indefiniteMadness,
+      outcome: outcomeLabel,
+      ruleId,
     },
   };
   const decision = replyOnly(input, context, 'coc.sc', text);
@@ -4972,10 +5436,17 @@ async function tiHandler(input: CommandInput, context: CommandContext): Promise<
   const conv = context.snapshot.conversation;
   const sheet = context.snapshot.sheet;
   const senderId = input.sender?.externalId ?? 'unknown';
-  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const actorName =
+    sheet?.name ??
+    input.sender?.name ??
+    formatMessage(context, 'character.nn.default', { suffix: senderId.slice(-4) || '1' });
 
   const res = await rollMadnessSymptom('temporal', context.random);
-  const text = `「${actorName}」的疯狂发作-即时症状:\n${res.expressionText}\n${res.description}`;
+  const text = formatMessage(context, 'coc.ti', {
+    actor: actorName,
+    expression: res.expressionText,
+    description: res.description,
+  });
 
   const reply: PreparedReply = {
     executionId: input.executionId,
@@ -5009,10 +5480,17 @@ async function liHandler(input: CommandInput, context: CommandContext): Promise<
   const conv = context.snapshot.conversation;
   const sheet = context.snapshot.sheet;
   const senderId = input.sender?.externalId ?? 'unknown';
-  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const actorName =
+    sheet?.name ??
+    input.sender?.name ??
+    formatMessage(context, 'character.nn.default', { suffix: senderId.slice(-4) || '1' });
 
   const res = await rollMadnessSymptom('summary', context.random);
-  const text = `「${actorName}」的疯狂发作-总结症状:\n${res.expressionText}\n${res.description}`;
+  const text = formatMessage(context, 'coc.li', {
+    actor: actorName,
+    expression: res.expressionText,
+    description: res.description,
+  });
 
   const reply: PreparedReply = {
     executionId: input.executionId,
@@ -5044,15 +5522,15 @@ async function liHandler(input: CommandInput, context: CommandContext): Promise<
 async function enHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
   const sheet = context.snapshot.sheet;
   if (input.args.length === 0 || input.args[0]?.toLowerCase() === 'help') {
+    return replyOnly(input, context, 'coc.en.help', formatMessage(context, 'coc.en.help'));
+  }
+  if (!sheet) {
     return replyOnly(
       input,
       context,
-      'coc.en.help',
-      '成长格式：.en <技能>[当前值] [+[失败增量/]成功增量]；多个技能可用空格或 | 分隔。',
+      'coc.en.missing_sheet',
+      formatMessage(context, 'coc.en.missing_sheet'),
     );
-  }
-  if (!sheet) {
-    return replyOnly(input, context, 'coc.en.missing_sheet', '技能成长需要先绑定角色卡。');
   }
   const mismatch = ensureSheetRule(input, context, 'coc7');
   if (mismatch) {
@@ -5072,7 +5550,7 @@ async function enHandler(input: CommandInput, context: CommandContext): Promise<
       input,
       context,
       'coc.en.invalid',
-      parsedItems.length > 10 ? '单次最多处理十项技能。' : '无法解析技能成长参数。',
+      formatMessage(context, parsedItems.length > 10 ? 'coc.en.too_many' : 'coc.en.invalid'),
     );
   }
 
@@ -5089,7 +5567,7 @@ async function enHandler(input: CommandInput, context: CommandContext): Promise<
         input,
         context,
         'coc.en.missing_skill',
-        `角色卡未记录「${item.skill}」，请先录入或在技能名后提供数值。`,
+        formatMessage(context, 'coc.en.missing_skill', { skill: item.skill }),
       );
     }
     const successExpression = parseNumericExpression(item.successExpression, 10);
@@ -5101,7 +5579,7 @@ async function enHandler(input: CommandInput, context: CommandContext): Promise<
         input,
         context,
         'coc.en.invalid_increment',
-        `「${item.skill}」的成长表达式无法解析。`,
+        formatMessage(context, 'coc.en.invalid_increment', { skill: item.skill }),
       );
     }
     prepared.push({
@@ -5138,7 +5616,19 @@ async function enHandler(input: CommandInput, context: CommandContext): Promise<
       success,
     });
     lines.push(
-      `${item.skill}：D100=${roll}/${item.oldValue}，${success ? '成长成功' : '未成长'}${incrementExpression ? `，${incrementExpression.source}=${increment}，当前 ${newValue}` : ''}`,
+      formatMessage(context, 'coc.en.item', {
+        skill: item.skill,
+        roll,
+        oldValue: item.oldValue,
+        result: formatMessage(context, success ? 'coc.en.success' : 'coc.en.failed'),
+        increment: incrementExpression
+          ? formatMessage(context, 'coc.en.increment', {
+              expression: incrementExpression.source,
+              increment,
+              newValue,
+            })
+          : '',
+      }),
     );
   }
 
@@ -5162,7 +5652,10 @@ async function enHandler(input: CommandInput, context: CommandContext): Promise<
     input,
     context,
     'coc.en',
-    `「${sheet.name}」的技能成长：\n${lines.join('\n')}`,
+    formatMessage(context, 'coc.en.summary', {
+      actor: sheet.name,
+      items: lines.join('\n'),
+    }),
   );
   return {
     ...decision,
@@ -5183,7 +5676,10 @@ async function dsHandler(input: CommandInput, context: CommandContext): Promise<
   const conv = context.snapshot.conversation;
   const sheet = context.snapshot.sheet;
   const senderId = input.sender?.externalId ?? 'unknown';
-  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const actorName =
+    sheet?.name ??
+    input.sender?.name ??
+    formatMessage(context, 'character.nn.default', { suffix: senderId.slice(-4) || '1' });
   const args = input.args;
   const sub = args[0]?.trim();
 
@@ -5196,7 +5692,7 @@ async function dsHandler(input: CommandInput, context: CommandContext): Promise<
       targetId: conv.externalId,
       originMessageId: input.messageId,
       templateKey: 'dnd5e.ds.nohp',
-      text: `${actorName} 未设置生命值，无法进行死亡豁免检定。`,
+      text: formatMessage(context, 'dnd5e.ds.nohp', { actor: actorName }),
       deadline,
     };
     return { results: [], updates: [], replies: [reply], logItems: [] };
@@ -5212,7 +5708,7 @@ async function dsHandler(input: CommandInput, context: CommandContext): Promise<
       targetId: conv.externalId,
       originMessageId: input.messageId,
       templateKey: 'dnd5e.ds.alive',
-      text: `${actorName} 生命值大于0(当前为${currentHp})，无法进行死亡豁免检定。`,
+      text: formatMessage(context, 'dnd5e.ds.alive', { actor: actorName, hp: currentHp }),
       deadline,
     };
     return { results: [], updates: [], replies: [reply], logItems: [] };
@@ -5230,7 +5726,12 @@ async function dsHandler(input: CommandInput, context: CommandContext): Promise<
       targetId: conv.externalId,
       originMessageId: input.messageId,
       templateKey: 'dnd5e.ds.stat',
-      text: `${actorName} 当前的死亡豁免情况: 成功${dss} 失败${dsf}`,
+      text: formatMessage(context, 'dnd5e.ds.stat', {
+        actor: actorName,
+        successes: dss,
+        failures: dsf,
+        outcome: '',
+      }),
       deadline,
     };
     return { results: [], updates: [], replies: [reply], logItems: [] };
@@ -5242,7 +5743,12 @@ async function dsHandler(input: CommandInput, context: CommandContext): Promise<
     const isNeg = manualMatch[2] === '-' || manualMatch[2] === '－';
     const parsedValue = parseNumericExpression(manualMatch[3], 20);
     if (!parsedValue) {
-      return replyOnly(input, context, 'dnd5e.ds.invalid', '死亡豁免计数表达式无法解析。');
+      return replyOnly(
+        input,
+        context,
+        'dnd5e.ds.invalid',
+        formatMessage(context, 'dnd5e.ds.invalid_count'),
+      );
     }
     const val = (await evaluateNumericExpression(parsedValue, context.random)) * (isNeg ? -1 : 1);
     if (kind === 's' || kind === 'S' || kind === '成功') {
@@ -5253,11 +5759,11 @@ async function dsHandler(input: CommandInput, context: CommandContext): Promise<
     const { stable, dead } = deathSaveResultText({ successes: dss, failures: dsf });
     let exText = '';
     if (stable) {
-      exText = '\n累计获得了3次死亡豁免检定成功，伤势稳定了！';
+      exText = formatMessage(context, 'dnd5e.ds.stable');
       dss = 0;
       dsf = 0;
     } else if (dead) {
-      exText = '\n累计获得了3次死亡豁免检定失败，不幸去世了！';
+      exText = formatMessage(context, 'dnd5e.ds.dead');
       dss = 0;
       dsf = 0;
     }
@@ -5277,7 +5783,12 @@ async function dsHandler(input: CommandInput, context: CommandContext): Promise<
       targetId: conv.externalId,
       originMessageId: input.messageId,
       templateKey: 'dnd5e.ds.manual',
-      text: `${actorName} 当前的死亡豁免情况: 成功${dss} 失败${dsf}${exText}`,
+      text: formatMessage(context, 'dnd5e.ds.stat', {
+        actor: actorName,
+        successes: dss,
+        failures: dsf,
+        outcome: exText,
+      }),
       deadline,
     };
     return { results: [], updates: [update], replies: [reply], logItems: [] };
@@ -5300,7 +5811,12 @@ async function dsHandler(input: CommandInput, context: CommandContext): Promise<
     ? parseNumericExpression(modifierExpression.replace(/^\+/u, ''), 20)
     : undefined;
   if (modifierExpression && !parsedModifier) {
-    return replyOnly(input, context, 'dnd5e.ds.invalid', '死亡豁免加值表达式无法解析。');
+    return replyOnly(
+      input,
+      context,
+      'dnd5e.ds.invalid',
+      formatMessage(context, 'dnd5e.ds.invalid_modifier'),
+    );
   }
   const modifier = parsedModifier
     ? await evaluateNumericExpression(parsedModifier, context.random)
@@ -5317,7 +5833,7 @@ async function dsHandler(input: CommandInput, context: CommandContext): Promise<
   let exText = '';
 
   if (outcome === 'revive') {
-    outcomeText = '你觉得你还可以抢救一下！HP回复1点！伤势稳定了！';
+    outcomeText = formatMessage(context, 'dnd5e.ds.revive');
     nextAttrs.HP = 1;
     nextAttrs.hp = 1;
     dss = 0;
@@ -5326,19 +5842,19 @@ async function dsHandler(input: CommandInput, context: CommandContext): Promise<
     dss = Math.max(0, dss + successPlus);
     dsf = Math.max(0, dsf + failurePlus);
     if (outcome === 'criticalFailure') {
-      outcomeText = '伤势莫名加重了！死亡豁免失败+2！';
+      outcomeText = formatMessage(context, 'dnd5e.ds.critical_failure');
     } else if (outcome === 'success') {
-      outcomeText = '伤势暂时得到控制！死亡豁免成功+1';
+      outcomeText = formatMessage(context, 'dnd5e.ds.success');
     } else {
-      outcomeText = '有些不妙！死亡豁免失败+1';
+      outcomeText = formatMessage(context, 'dnd5e.ds.failure');
     }
     const { stable, dead } = deathSaveResultText({ successes: dss, failures: dsf });
     if (stable) {
-      exText = '\n累计获得了3次死亡豁免检定成功，伤势稳定了！';
+      exText = formatMessage(context, 'dnd5e.ds.stable');
       dss = 0;
       dsf = 0;
     } else if (dead) {
-      exText = '\n累计获得了3次死亡豁免检定失败，不幸去世了！';
+      exText = formatMessage(context, 'dnd5e.ds.dead');
       dss = 0;
       dsf = 0;
     }
@@ -5355,8 +5871,19 @@ async function dsHandler(input: CommandInput, context: CommandContext): Promise<
     newVersion: sheet.version + 1,
   };
 
-  const statusText = outcome === 'revive' ? '' : `\n当前情况: 成功${dss} 失败${dsf}`;
-  const text = `${actorName} 的死亡豁免检定: 1D20=${d20}${modifier === 0 ? '' : `，加值 ${modifier}`}，合计 ${total}。${outcomeText}${exText}${statusText}`;
+  const statusText =
+    outcome === 'revive'
+      ? ''
+      : formatMessage(context, 'dnd5e.ds.status', { successes: dss, failures: dsf });
+  const text = formatMessage(context, 'dnd5e.ds.roll', {
+    actor: actorName,
+    roll: d20,
+    modifier: modifier === 0 ? '' : formatMessage(context, 'dnd5e.ds.modifier', { modifier }),
+    total,
+    outcome: outcomeText,
+    terminal: exText,
+    status: statusText,
+  });
 
   const reply: PreparedReply = {
     executionId: input.executionId,
@@ -5396,7 +5923,10 @@ async function setcocHandler(
   if (!arg) {
     const currentRule = conv.cocRule ?? '0';
     const def = resolveCocHouseRule(currentRule) ?? COC_HOUSE_RULES[0];
-    const text = `当前房规: ${def ? def.name : currentRule}\n${def ? def.desc : ''}`;
+    const text = formatMessage(context, 'coc.setcoc.current', {
+      name: def ? def.name : currentRule,
+      description: def ? def.desc : '',
+    });
     const reply: PreparedReply = {
       executionId: input.executionId,
       part: 1,
@@ -5412,8 +5942,12 @@ async function setcocHandler(
   }
 
   if (arg === 'details') {
-    const lines = COC_HOUSE_RULES.map(
-      (r) => `.setcoc ${r.key} // ${r.name}：${r.desc.replaceAll('\n', ' ')}`,
+    const lines = COC_HOUSE_RULES.map((rule) =>
+      formatMessage(context, 'coc.setcoc.item', {
+        key: rule.key,
+        name: rule.name,
+        description: rule.desc.replaceAll('\n', ' '),
+      }),
     );
     const reply: PreparedReply = {
       executionId: input.executionId,
@@ -5423,7 +5957,7 @@ async function setcocHandler(
       targetId: conv.externalId,
       originMessageId: input.messageId,
       templateKey: 'coc.setcoc.details',
-      text: `COC房规列表：\n${lines.join('\n')}`,
+      text: formatMessage(context, 'coc.setcoc.details', { items: lines.join('\n') }),
       deadline,
     };
     return { results: [], updates: [], replies: [reply], logItems: [] };
@@ -5439,7 +5973,7 @@ async function setcocHandler(
       targetId: conv.externalId,
       originMessageId: input.messageId,
       templateKey: 'coc.setcoc.invalid',
-      text: `无效的房规：${arg}。可选规则：0~5，dg。使用 .setcoc details 查看详细说明。`,
+      text: formatMessage(context, 'coc.setcoc.invalid', { rule: arg }),
       deadline,
     };
     return { results: [], updates: [], replies: [reply], logItems: [] };
@@ -5453,7 +5987,11 @@ async function setcocHandler(
     newVersion: conv.version + 1,
   };
 
-  const text = `已切换为 COC7 规则，并采用房规 ${targetRule.name} (${targetRule.key})：\n${targetRule.desc}`;
+  const text = formatMessage(context, 'coc.setcoc.set', {
+    name: targetRule.name,
+    key: targetRule.key,
+    description: targetRule.desc,
+  });
 
   const reply: PreparedReply = {
     executionId: input.executionId,
@@ -5496,7 +6034,7 @@ async function findHandler(input: CommandInput, context: CommandContext): Promis
       targetId: conv.externalId,
       originMessageId: input.messageId,
       templateKey: 'find.help',
-      text: '规则查询指令：.find <关键词>\n例：.find 理智 或 .find 死亡豁免',
+      text: formatMessage(context, 'find.help'),
       deadline,
     };
     return { results: [], updates: [], replies: [reply], logItems: [] };
@@ -5521,7 +6059,7 @@ async function findHandler(input: CommandInput, context: CommandContext): Promis
         input,
         context,
         'find.group_invalid',
-        '规则分组仅支持 coc7、dnd5e、general 或 all。',
+        formatMessage(context, 'find.group_invalid'),
       );
     }
     const pageArg = directGroup ? input.args[1] : input.args[2];
@@ -5553,9 +6091,19 @@ async function findHandler(input: CommandInput, context: CommandContext): Promis
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'find.list',
-          text: `${groupName} 规则目录 ${page}/${totalPages}：\n${pageEntries
-            .map((entry) => `#${entry.id} ${entry.title}`)
-            .join('\n')}`,
+          text: formatMessage(context, 'find.list', {
+            group: groupName,
+            page,
+            totalPages,
+            entries: pageEntries
+              .map((entry) =>
+                formatMessage(context, 'find.list.item', {
+                  id: entry.id,
+                  title: entry.title,
+                }),
+              )
+              .join('\n'),
+          }),
           deadline,
         },
       ],
@@ -5566,12 +6114,20 @@ async function findHandler(input: CommandInput, context: CommandContext): Promis
   const { matches } = searchRuleGlossary(query, 5);
   let text = '';
   if (matches.length === 0) {
-    text = `未找到与「${query}」相关的规则条目。`;
+    text = formatMessage(context, 'find.empty', { query });
   } else {
-    const entries = matches.map(
-      (match) => `📖 #${match.id} [${match.ruleSet}]【${match.title}】\n${match.content}`,
+    const entries = matches.map((match) =>
+      formatMessage(context, 'find.result.item', {
+        id: match.id,
+        ruleSet: match.ruleSet,
+        title: match.title,
+        content: match.content,
+      }),
     );
-    text = `查询「${query}」的结果：\n\n${entries.join('\n\n')}`;
+    text = formatMessage(context, 'find.result', {
+      query,
+      entries: entries.join('\n\n'),
+    });
   }
 
   const reply: PreparedReply = {
@@ -5622,7 +6178,7 @@ async function pingHandler(input: CommandInput, context: CommandContext): Promis
         targetId: context.snapshot.conversation.externalId,
         originMessageId: input.messageId,
         templateKey: 'utility.ping',
-        text: 'Pong',
+        text: formatMessage(context, 'utility.ping'),
         deadline: new Date(input.timestamp.getTime() + 300_000),
       },
     ],
@@ -5637,7 +6193,12 @@ async function whoHandler(input: CommandInput, context: CommandContext): Promise
     .map((choice) => choice.trim())
     .filter(Boolean);
   if (choices.length < 2) {
-    return replyOnly(input, context, 'utility.who.help', '用法：.who <候选1> <候选2> [...]');
+    return replyOnly(
+      input,
+      context,
+      'utility.who.help',
+      formatMessage(context, 'utility.who.help'),
+    );
   }
   for (let index = choices.length - 1; index > 0; index -= 1) {
     const target = await context.random.integer(0, index);
@@ -5662,7 +6223,7 @@ async function whoHandler(input: CommandInput, context: CommandContext): Promise
         targetId: context.snapshot.conversation.externalId,
         originMessageId: input.messageId,
         templateKey: 'utility.who',
-        text: `随机顺序：${choices.join('、')}`,
+        text: formatMessage(context, 'utility.who', { choices: choices.join('、') }),
         deadline: new Date(input.timestamp.getTime() + 300_000),
       },
     ],
@@ -5675,10 +6236,23 @@ async function jrrpHandler(input: CommandInput, context: CommandContext): Promis
   const conv = context.snapshot.conversation;
   const sheet = context.snapshot.sheet;
   const senderId = input.sender?.externalId ?? 'unknown';
-  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const actorName =
+    sheet?.name ??
+    input.sender?.name ??
+    formatMessage(context, 'character.nn.default', { suffix: senderId.slice(-4) || '1' });
 
   const jrrp = computeJrrp(senderId, input.timestamp);
-  const text = formatJrrpReply(actorName, jrrp);
+  const comment =
+    jrrp > 95
+      ? formatMessage(context, 'fun.jrrp.excellent')
+      : jrrp > 80
+        ? formatMessage(context, 'fun.jrrp.lucky')
+        : jrrp > 50
+          ? formatMessage(context, 'fun.jrrp.good')
+          : jrrp > 10
+            ? formatMessage(context, 'fun.jrrp.poor')
+            : formatMessage(context, 'fun.jrrp.bad');
+  const text = formatMessage(context, 'fun.jrrp', { actor: actorName, jrrp, comment });
 
   const reply: PreparedReply = {
     executionId: input.executionId,
@@ -5712,7 +6286,10 @@ async function guguHandler(input: CommandInput, context: CommandContext): Promis
   const conv = context.snapshot.conversation;
   const sheet = context.snapshot.sheet;
   const senderId = input.sender?.externalId ?? 'unknown';
-  const actorName = sheet?.name ?? input.sender?.name ?? `用户_${senderId.slice(-4) || '1'}`;
+  const actorName =
+    sheet?.name ??
+    input.sender?.name ??
+    formatMessage(context, 'character.nn.default', { suffix: senderId.slice(-4) || '1' });
   const firstArg = input.args[0]?.toLowerCase().trim();
 
   if (firstArg === 'help') {
@@ -5724,7 +6301,7 @@ async function guguHandler(input: CommandInput, context: CommandContext): Promis
       targetId: conv.externalId,
       originMessageId: input.messageId,
       templateKey: 'fun.gugu.help',
-      text: '咕咕理由指令：\n.gugu // 随机获取一个跑团请假借口\n.gugu 来源 // 附带作者署名',
+      text: formatMessage(context, 'fun.gugu.help'),
       deadline,
     };
     return { results: [], updates: [], replies: [reply], logItems: [] };
@@ -5733,7 +6310,11 @@ async function guguHandler(input: CommandInput, context: CommandContext): Promis
   const showFrom =
     firstArg === 'from' || firstArg === 'showfrom' || firstArg === '来源' || firstArg === '作者';
 
-  const text = await getRandomGugu(context.random, actorName, showFrom);
+  const entry = await getRandomGugu(context.random);
+  const content = entry.template.replaceAll('{$t玩家}', actorName);
+  const text = showFrom
+    ? formatMessage(context, 'fun.gugu.with_author', { text: content, author: entry.author })
+    : formatMessage(context, 'fun.gugu', { text: content });
 
   const reply: PreparedReply = {
     executionId: input.executionId,
@@ -5776,7 +6357,7 @@ async function nameHandler(input: CommandInput, context: CommandContext): Promis
       targetId: conv.externalId,
       originMessageId: input.messageId,
       templateKey: 'fun.name.help',
-      text: '随机名字生成：\n.name [cn/en/jp] [<数量>] [<男/女>]\n例：.name cn 3 男 或 .name en',
+      text: formatMessage(context, 'fun.name.help'),
       deadline,
     };
     return { results: [], updates: [], replies: [reply], logItems: [] };
@@ -5807,7 +6388,10 @@ async function nameHandler(input: CommandInput, context: CommandContext): Promis
   }
 
   const names = await generateRandomName(type, count, gender, context.random);
-  const text = `生成随机名字 (${type})：\n${names.join('\n')}`;
+  const text = formatMessage(context, 'fun.name', {
+    type,
+    names: names.join('\n'),
+  });
 
   const reply: PreparedReply = {
     executionId: input.executionId,
@@ -5853,7 +6437,7 @@ async function namedndHandler(
       targetId: conv.externalId,
       originMessageId: input.messageId,
       templateKey: 'fun.namednd.help',
-      text: 'DND名字生成：\n.namednd [达马拉/卡林珊/莱瑟曼/受国/精灵/矮人/兽人/海族/地精] [<数量>]\n例：.namednd 精灵 3',
+      text: formatMessage(context, 'fun.namednd.help'),
       deadline,
     };
     return { results: [], updates: [], replies: [reply], logItems: [] };
@@ -5874,7 +6458,10 @@ async function namedndHandler(
       input,
       context,
       'fun.namednd.unknown_race',
-      `不支持种族「${args[0]}」。当前可选：${Object.keys(supportedRaces).join('、')}。`,
+      formatMessage(context, 'fun.namednd.unknown_race', {
+        race: args[0],
+        races: Object.keys(supportedRaces).join('、'),
+      }),
     );
   }
 
@@ -5888,7 +6475,10 @@ async function namedndHandler(
   }
 
   const names = await generateDndName(race, count, context.random);
-  const text = `生成 DND 名字 (${race})：\n${names.join('\n')}`;
+  const text = formatMessage(context, 'fun.namednd', {
+    race,
+    names: names.join('\n'),
+  });
 
   const reply: PreparedReply = {
     executionId: input.executionId,
@@ -5932,15 +6522,7 @@ async function moduHandler(input: CommandInput, context: CommandContext): Promis
       targetId: conv.externalId,
       originMessageId: input.messageId,
       templateKey: 'fun.modu.help',
-      text:
-        '魔都模组网查询：\n' +
-        '.modu search <关键字> [<页码>] - 搜索关键字\n' +
-        '.modu rec <关键字> [<页码>] - 搜索编辑推荐\n' +
-        '.modu author <作者> [<页码>] - 搜索指定作者\n' +
-        '.modu luck [<页码>] - 查看编辑推荐\n' +
-        '.modu get <编号> - 查看指定详情\n' +
-        '.modu roll - 随机抽取推荐模组\n' +
-        '.modu help - 显示帮助',
+      text: formatMessage(context, 'fun.modu.help'),
       deadline,
     };
     return { results: [], updates: [], replies: [reply], logItems: [] };
@@ -5957,14 +6539,16 @@ async function moduHandler(input: CommandInput, context: CommandContext): Promis
         targetId: conv.externalId,
         originMessageId: input.messageId,
         templateKey: 'fun.modu.error',
-        text: '请提供模组编号：.modu get <编号>',
+        text: formatMessage(context, 'fun.modu.missing_id'),
         deadline,
       };
       return { results: [], updates: [], replies: [reply], logItems: [] };
     }
 
     const detail = await fetchCnmodsDetail(keyId);
-    const text = detail ? formatCnmodsDetail(detail) : '魔都查询出错，请稍后再试';
+    const text = detail
+      ? formatCnmodsDetail(context.messageCatalog ?? defaultMessageCatalog, detail)
+      : formatMessage(context, 'fun.modu.error');
 
     const reply: PreparedReply = {
       executionId: input.executionId,
@@ -5995,15 +6579,19 @@ async function moduHandler(input: CommandInput, context: CommandContext): Promis
 
   if (sub === 'roll') {
     const searchRes = await fetchCnmodsSearch('', 1, true);
-    let text = '魔都查询出错，请稍后再试';
+    let text = formatMessage(context, 'fun.modu.error');
     if (searchRes && searchRes.list.length > 0) {
       const idx = await context.random.integer(0, searchRes.list.length - 1);
       const chosen = searchRes.list[idx];
       if (chosen) {
         const detail = await fetchCnmodsDetail(String(chosen.keyId));
         text = detail
-          ? formatCnmodsDetail(detail)
-          : `[${chosen.keyId}] ${chosen.title} - by ${chosen.article}`;
+          ? formatCnmodsDetail(context.messageCatalog ?? defaultMessageCatalog, detail)
+          : formatMessage(context, 'fun.modu.roll_fallback', {
+              id: chosen.keyId,
+              title: chosen.title,
+              author: chosen.article,
+            });
       }
     }
 
@@ -6068,7 +6656,9 @@ async function moduHandler(input: CommandInput, context: CommandContext): Promis
     }
 
     const result = await fetchCnmodsSearch(keyword, page, isRec, author);
-    const text = result ? formatCnmodsSearchResult(page, result) : '魔都查询出错，请稍后再试';
+    const text = result
+      ? formatCnmodsSearchResult(context.messageCatalog ?? defaultMessageCatalog, page, result)
+      : formatMessage(context, 'fun.modu.error');
 
     const reply: PreparedReply = {
       executionId: input.executionId,
@@ -6105,7 +6695,7 @@ async function moduHandler(input: CommandInput, context: CommandContext): Promis
     targetId: conv.externalId,
     originMessageId: input.messageId,
     templateKey: 'fun.modu.help',
-    text: '未知魔都子指令，输入 .modu help 查看帮助',
+    text: formatMessage(context, 'fun.modu.unknown'),
     deadline,
   };
   return { results: [], updates: [], replies: [reply], logItems: [] };
@@ -6119,7 +6709,12 @@ async function policyHandler(
   const sub = input.args[0]?.toLowerCase() ?? 'list';
   const delegates = context.snapshot.delegatePrincipals ?? [];
   if (delegates.length > 1) {
-    return replyOnly(input, context, 'policy.target_ambiguous', '一次只能指定一名被提及用户。');
+    return replyOnly(
+      input,
+      context,
+      'policy.target_ambiguous',
+      formatMessage(context, 'policy.target_ambiguous'),
+    );
   }
   const target = delegates[0];
   if (sub === 'list' || sub === 'show') {
@@ -6134,20 +6729,36 @@ async function policyHandler(
       'policy.list',
       entries.length > 0
         ? entries
-            .map(
-              (entry) => `${entry.id}: ${entry.effect}${entry.reason ? ` (${entry.reason})` : ''}`,
+            .map((entry) =>
+              formatMessage(context, 'policy.item', {
+                id: entry.id,
+                effect: entry.effect,
+                reason: entry.reason
+                  ? formatMessage(context, 'policy.reason', { reason: entry.reason })
+                  : '',
+              }),
             )
             .join('\n')
-        : '当前范围没有策略记录。',
+        : formatMessage(context, 'policy.empty'),
     );
   }
   if (!target) {
-    return replyOnly(input, context, 'policy.target_required', '请通过平台提及指定要管理的用户。');
+    return replyOnly(
+      input,
+      context,
+      'policy.target_required',
+      formatMessage(context, 'policy.target_required'),
+    );
   }
   const current = context.snapshot.delegatePolicyEntries?.[target.externalId];
   if (sub === 'rm' || sub === 'del' || sub === 'remove') {
     if (!current) {
-      return replyOnly(input, context, 'policy.not_found', '该用户在当前群没有策略记录。');
+      return replyOnly(
+        input,
+        context,
+        'policy.not_found',
+        formatMessage(context, 'policy.not_found'),
+      );
     }
     return {
       results: [
@@ -6174,7 +6785,9 @@ async function policyHandler(
           targetId: conv.externalId,
           originMessageId: input.messageId,
           templateKey: 'policy.remove',
-          text: `已移除「${target.name ?? target.externalId}」在当前群的策略记录。`,
+          text: formatMessage(context, 'policy.remove', {
+            target: target.name ?? target.externalId,
+          }),
           deadline: new Date(input.timestamp.getTime() + 300_000),
         },
       ],
@@ -6183,12 +6796,7 @@ async function policyHandler(
   }
   const effect = sub === 'trust' ? 'trust' : sub === 'add' || sub === 'deny' ? 'deny' : undefined;
   if (!effect) {
-    return replyOnly(
-      input,
-      context,
-      'policy.help',
-      '用法：.black add @用户 [原因]、.black trust @用户 [原因]、.black rm @用户、.black list',
-    );
+    return replyOnly(input, context, 'policy.help', formatMessage(context, 'policy.help'));
   }
   const reason = input.args.slice(1).join(' ').trim();
   const entryId = current?.id ?? `policy_${conv.id}_${target.externalId}`;
@@ -6225,7 +6833,10 @@ async function policyHandler(
         targetId: conv.externalId,
         originMessageId: input.messageId,
         templateKey: 'policy.set',
-        text: `已将「${target.name ?? target.externalId}」在当前群设为 ${effect === 'deny' ? '拒绝' : '信任'}。`,
+        text: formatMessage(context, 'policy.set', {
+          target: target.name ?? target.externalId,
+          effect: formatMessage(context, effect === 'deny' ? 'policy.deny' : 'policy.trust'),
+        }),
         deadline: new Date(input.timestamp.getTime() + 300_000),
       },
     ],
@@ -6241,7 +6852,7 @@ async function unsupportedAdministrationHandler(
     input,
     context,
     'system.unsupported',
-    `「.${input.commandName}」依赖 SealDice 的常驻进程或扩展管理模型，Cloudflare Workers 部署不提供该运行时操作。`,
+    formatMessage(context, 'system.unsupported', { command: input.commandName }),
   );
 }
 
@@ -6253,7 +6864,7 @@ async function unsupportedRulesetHandler(
     input,
     context,
     'ruleset.unsupported',
-    `当前部署尚未启用「.${input.commandName}」对应规则集；已支持的核心规则为 COC7 与 DND5E。`,
+    formatMessage(context, 'ruleset.unsupported', { command: input.commandName }),
   );
 }
 
@@ -6265,7 +6876,7 @@ async function unsupportedMessagingHandler(
     input,
     context,
     'messaging.unsupported',
-    `「.${input.commandName}」依赖平台主动消息、群成员事件或可信骰主收件身份；当前 QQ 官方机器人部署未验证该权限，因此不会伪造成功。群内处置请使用 .black，固定欢迎语和回复应由配置包发布。`,
+    formatMessage(context, 'messaging.unsupported', { command: input.commandName }),
   );
 }
 
@@ -6277,7 +6888,7 @@ async function unsupportedExtensionHandler(
     input,
     context,
     'extension.unsupported',
-    `当前部署未启用「.${input.commandName}」对应的聊天侧扩展能力。`,
+    formatMessage(context, 'extension.unsupported', { command: input.commandName }),
   );
 }
 

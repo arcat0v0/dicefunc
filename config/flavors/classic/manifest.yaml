@@ -1,7 +1,0 @@
-schemaVersion: 1
-id: classic
-displayName: 经典风格
-extends: null
-files:
-  - replies/core.yaml
-  - replies/coc7.yaml

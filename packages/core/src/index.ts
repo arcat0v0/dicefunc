@@ -5,6 +5,7 @@ export * from './ports/runtime-logger.js';
 export * from './ports/reply-sender.js';
 export * from './ports/job-queue.js';
 export * from './ports/archive-store.js';
+export * from './messages/index.js';
 
 export {
   type ConversationSession,

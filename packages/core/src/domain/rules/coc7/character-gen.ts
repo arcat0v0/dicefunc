@@ -99,24 +99,3 @@ export async function generateCoc7Card(random: RandomSource): Promise<Coc7CardAt
     totalWithLuck,
   };
 }
-
-export function formatCoc7CardBody(card: Coc7CardAttributes): string {
-  return (
-    `力量:${card.str} 敏捷:${card.dex} 意志:${card.pow}\n` +
-    `体质:${card.con} 外貌:${card.app} 教育:${card.edu}\n` +
-    `体型:${card.siz} 智力:${card.int} 幸运:${card.luk}\n` +
-    `HP:${card.hp} <DB:${card.db}> [${card.baseTotal}/${card.totalWithLuck}]`
-  );
-}
-
-export function formatCoc7CardSingle(actorName: string, card: Coc7CardAttributes): string {
-  return `<${actorName}>的七版COC人物作成:\n${formatCoc7CardBody(card)}`;
-}
-
-export function formatCoc7CardBatch(
-  actorName: string,
-  cards: readonly Coc7CardAttributes[],
-): string {
-  const cardTexts = cards.map((c) => formatCoc7CardBody(c));
-  return `<${actorName}>的七版COC人物作成:\n${cardTexts.join('\n\n')}`;
-}

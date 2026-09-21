@@ -96,35 +96,17 @@ dicefunc/
 pnpm install
 ```
 
-### 自定义机器人回复文案
+### 机器人回复文案
 
-回复文案位于 `config/flavors/<风格>/replies/*.yaml`：
+运行时回复文案集中在 `packages/core/src/messages/zh-CN/`，通过稳定语义键和类型化参数渲染。当前只提供 `zh-CN`，在构建时打包；尚未提供运行时语言切换、风格覆盖或面向用户的文案配置 CLI。
 
-- `config/flavors/classic/replies/core.yaml`：机器人名称和基础掷骰文案；
-- `config/flavors/classic/replies/coc7.yaml`：COC7 检定文案；
-- `config/flavors/gothic/replies/coc7.yaml`：覆盖 `classic` 的古典怪谈风格文案。
-
-每个模板由一个或多个 `variants` 组成。`id` 用于稳定标识候选文案，`weight` 控制随机选中权重，`text` 支持 `{{actor.name}}` 等结构化模板字段。例如修改机器人在跑团日志中的名称：
-
-```yaml
-schemaVersion: 1
-templates:
-  bot.name:
-    variants:
-      - id: default
-        weight: 1
-        text: Dicefunc
-```
-
-`bot.name` 使用第一个 variant 的 `text`；未配置或内容为空时默认为 `Dicefunc`。修改后执行：
+`templates.ts` 保存需要结构化模板字段和稳定 variant 的回复模板，其余命令、权限、状态与错误消息按领域拆分到同目录文件。修改后执行：
 
 ```bash
 pnpm check
 pnpm test:runtime
 pnpm deploy:worker
 ```
-
-当前 Worker 会在构建时直接打包并使用 `classic/replies/core.yaml` 中的 `bot.name`，不需要设置名称环境变量。其他 YAML 回复模板尚未接入 Worker 运行时，修改它们不会改变线上回复；当前没有面向用户的回复文案 CLI。
 
 ### 本地开发与测试
 
@@ -254,13 +236,13 @@ pnpm check && pnpm test:integration   # 自检
 pnpm deploy:worker                    # 重新部署（资源已存在，秒级完成）
 ```
 
-注意：配置包的运行时发布（KV/R2 versioned，P6）尚未实现。`config/flavors/classic/replies/core.yaml` 中的 `bot.name` 会在 Worker 构建时直接打包；其他规则和回复模板 YAML 尚未接入 Worker 运行时，Worker 行为仍以代码内注册内容为准。
+注意：配置包的运行时发布（KV/R2 versioned，P6）尚未实现。回复文案由 `packages/core/src/messages/zh-CN/` 在 Worker 构建时打包，当前不支持通过配置包切换语言或回复风格。
 
 ## 云资源与配置
 
 ### Secrets 与环境变量
 
-机器人在跑团日志中的默认昵称来自 `config/flavors/classic/replies/core.yaml` 的 `bot.name` 文案；当前默认值为 `Dicefunc`，不使用独立环境变量。
+机器人在跑团日志中的默认昵称来自 `packages/core/src/messages/zh-CN/core.ts` 的 `bot.display_name` 文案；当前默认值为 `Dicefunc`，不使用独立环境变量。
 
 - `ENVIRONMENT` - 运行环境（`production` / `staging` / `development`）
 - `PUBLIC_BASE_URL` - Worker 对外 HTTPS 根地址，用于生成 15 分钟有效的跑团日志下载链接

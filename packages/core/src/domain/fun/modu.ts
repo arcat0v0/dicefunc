@@ -176,31 +176,3 @@ export async function fetchCnmodsDetail(
     clearTimeout(timer);
   }
 }
-
-export function formatCnmodsSearchResult(page: number, data: CnmodsSearchResponseData): string {
-  if (data.list.length === 0) {
-    return '什么也没发现';
-  }
-
-  const lines = data.list.map((item) => {
-    const ver = item.moduleVersion === 'coc6th' ? '[coc6]' : '';
-    const agePlace = `${item.moduleAge ?? ''}${item.occurrencePlace ?? ''}`.trim();
-    return `[${item.keyId}]${ver}${item.title} ${agePlace} - by ${item.article}`;
-  });
-
-  return `来自cnmods的搜索结果 - ${page}/${data.totalPages}页${data.totalElements}项:\n${lines.join('\n')}`;
-}
-
-export function formatCnmodsDetail(item: CnmodsModuleDetail): string {
-  const ori = item.original ? '是' : '否';
-  return (
-    `[${item.keyId}]${item.title}\n` +
-    `作者: ${item.article}\n` +
-    `背景: ${item.moduleAge},${item.occurrencePlace}\n` +
-    `规模: ${item.minAmount}-${item.maxAmount}人，${item.minDuration}-${item.maxDuration}时\n` +
-    `原创: ${ori}\n` +
-    `简介: ${item.opinion}\n` +
-    `PC端链接：https://www.cnmods.net/web/moduleDetail?keyId=${item.keyId}\n` +
-    `移动端链接：https://www.cnmods.net/mobile/moduleDetail?keyId=${item.keyId}`
-  );
-}

@@ -1,4 +1,9 @@
-import { TemplateRenderer, createClassicTemplates } from '../domain/template/renderer.js';
+import { TemplateRenderer } from '../domain/template/renderer.js';
+import {
+  type MessageCatalog,
+  createZhCNTemplates,
+  defaultMessageCatalog,
+} from '../messages/index.js';
 import { type Clock, systemClock } from '../ports/clock.js';
 import { createSeededRandomSource } from '../ports/random-source.js';
 import type {
@@ -40,6 +45,7 @@ export class DefaultEventHandler implements EventHandler {
   private readonly configDigest: string;
   private readonly templateRenderer: TemplateRenderer;
   private readonly publicBaseUrl: string | undefined;
+  private readonly messageCatalog: MessageCatalog;
 
   constructor(
     stateStore: StateStore,
@@ -48,13 +54,15 @@ export class DefaultEventHandler implements EventHandler {
     configDigest?: string,
     templateRenderer?: TemplateRenderer,
     publicBaseUrl?: string,
+    messageCatalog?: MessageCatalog,
   ) {
     this.stateStore = stateStore;
     this.commandExecutor = commandExecutor ?? new CommandExecutor();
     this.clock = clock ?? systemClock;
     this.configDigest = configDigest ?? 'v1-default-config';
-    this.templateRenderer = templateRenderer ?? new TemplateRenderer(createClassicTemplates());
+    this.templateRenderer = templateRenderer ?? new TemplateRenderer(createZhCNTemplates());
     this.publicBaseUrl = publicBaseUrl;
+    this.messageCatalog = messageCatalog ?? defaultMessageCatalog;
   }
 
   async handle(event: VerifiedEvent): Promise<EventHandleResult> {
@@ -111,6 +119,7 @@ export class DefaultEventHandler implements EventHandler {
           budget,
           configVersion: this.configDigest,
           botId: event.botId,
+          messageCatalog: this.messageCatalog,
           hiddenRollLinks: this.stateStore,
           ...(this.publicBaseUrl ? { publicBaseUrl: this.publicBaseUrl } : {}),
         };
@@ -119,7 +128,9 @@ export class DefaultEventHandler implements EventHandler {
         const actorName =
           currentSnapshot.sheet?.name ??
           event.sender.name ??
-          `用户_${event.sender.externalId.slice(-4) || '1'}`;
+          this.messageCatalog.format('identity.fallback_name', {
+            suffix: event.sender.externalId.slice(-4) || '1',
+          });
         const logUpdate = decision.updates.find((update) => update.type === 'story-log');
         const outboundLogId = logUpdate
           ? logUpdate.changes.status === 'recording'
@@ -141,11 +152,17 @@ export class DefaultEventHandler implements EventHandler {
                     r.kind === rep.templateKey ||
                     (r.kind === 'dice_roll' && rep.templateKey === 'dice.roll'),
                 ) ?? decision.results[0];
+              const resultData = matchingResult?.data ?? {};
+              const resultActor = resultData.actor;
+              const templateActor =
+                typeof resultActor === 'string'
+                  ? { name: resultActor }
+                  : resultActor && typeof resultActor === 'object' && !Array.isArray(resultActor)
+                    ? { name: actorName, ...(resultActor as Record<string, unknown>) }
+                    : { name: actorName };
               const templateData = {
-                actor: {
-                  name: actorName,
-                },
-                ...(matchingResult?.data ?? {}),
+                ...resultData,
+                actor: templateActor,
               };
               const rendered = await this.templateRenderer.render(
                 rep.templateKey,

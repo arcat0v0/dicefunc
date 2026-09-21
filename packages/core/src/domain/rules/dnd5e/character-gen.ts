@@ -57,22 +57,3 @@ export async function generateDnd5eFreeCard(
   numbers.sort((a, b) => b - a);
   return { numbers, total };
 }
-
-export function formatDnd5eFreeCard(
-  actorName: string,
-  cards: readonly Dnd5eFreeAllocationCard[],
-): string {
-  const lines = cards.map((c) => `[${c.numbers.join(', ')}] = ${c.total}`);
-  return `<${actorName}>使用自由分配的DND5E人物作成:\n${lines.join('\n')}`;
-}
-
-export function formatDnd5ePresetCard(
-  actorName: string,
-  cards: readonly Dnd5eCardAttributes[],
-): string {
-  const lines = cards.map(
-    (c) =>
-      `力量:${c.str} 体质:${c.con} 敏捷:${c.dex} 智力:${c.int} 感知:${c.wis} 魅力:${c.cha} 共计:${c.total}`,
-  );
-  return `<${actorName}>使用预设模板的DND5E人物作成:\n${lines.join('\n')}`;
-}

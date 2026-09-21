@@ -1,10 +1,11 @@
 import {
   DefaultEventHandler,
   TemplateRenderer,
-  createClassicTemplates,
+  createCharacterSheet,
   createConversationSession,
   createDefaultCommandRegistry,
   createWebCryptoRandomSource,
+  createZhCNTemplates,
   systemClock,
 } from '@dicefunc/core';
 import type {
@@ -19,6 +20,7 @@ import { describe, expect, it } from 'vitest';
 
 class MockStateStore implements StateStore {
   public committed: CommandCommit | undefined;
+  constructor(private readonly sheet?: StateSnapshot['sheet']) {}
 
   async claimEvent(event: VerifiedEvent, _configDigest: string): Promise<EventClaim> {
     return {
@@ -44,6 +46,7 @@ class MockStateStore implements StateStore {
       conversation: conv,
       permissions: { isDiceMaster: true, isGroupHost: true, isTrusted: true, denied: false },
       recentlyUpdatedVersions: {},
+      ...(this.sheet ? { sheet: this.sheet } : {}),
     };
   }
 
@@ -113,9 +116,87 @@ describe('TemplateRenderer', () => {
     expect(res2.text).toBe('Second');
   });
 
+  it('keeps the authoritative COC outcome instead of randomizing failure severity', async () => {
+    const renderer = new TemplateRenderer(createZhCNTemplates());
+    const summary = [
+      '调查员进行「力量」检定',
+      '骰点：D100 = 62',
+      '目标值：55',
+      '要求：常规成功',
+      '结果：失败（未通过）',
+      '规则：规则书规则',
+    ].join('\n');
+    const rendered = await renderer.render(
+      'coc.check.failed',
+      {
+        summary,
+        actor: { name: '调查员' },
+        skill: { name: '力量' },
+        roll: { total: 62 },
+        target: { value: 55 },
+      },
+      {
+        async integer(_minInclusive: number, maxInclusive: number): Promise<number> {
+          return maxInclusive;
+        },
+        async bytes(length: number): Promise<Uint8Array> {
+          return new Uint8Array(length);
+        },
+      },
+    );
+
+    expect(rendered.variantId).toBe('detailed');
+    expect(rendered.text).toBe(summary);
+    expect(rendered.text).not.toContain('大失败');
+  });
+
+  it('preserves the detailed COC reply through the event handling pipeline', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_coc',
+      ownerId: 'user_1',
+      ruleSet: 'coc7',
+      name: '调查员',
+      attributes: { 力量: 55 },
+    });
+    const mockStore = new MockStateStore(sheet);
+    const handler = new DefaultEventHandler(
+      mockStore,
+      undefined,
+      systemClock,
+      'test-digest',
+      new TemplateRenderer(createZhCNTemplates()),
+    );
+    const event: VerifiedEvent = {
+      eventId: 'evt_coc_check',
+      botId: 'bot_test',
+      scene: 'groupAt',
+      externalId: 'group_1',
+      messageId: 'msg_coc_check',
+      timestamp: new Date(),
+      sender: {
+        type: 'groupMember',
+        externalId: 'user_1',
+        name: '群成员',
+      },
+      text: '。ra力量',
+      rawPayload: {},
+    };
+
+    const result = await handler.handle(event);
+
+    expect(result.success).toBe(true);
+    const text = mockStore.committed?.replies[0]?.text ?? '';
+    expect(text).toContain('调查员进行「力量」检定');
+    expect(text).toMatch(/骰点：D100 = \d+/);
+    expect(text).toContain('目标值：55');
+    expect(text).toContain('要求：常规成功');
+    expect(text).toMatch(/结果：(大成功|极难成功|困难成功|常规成功|失败|大失败)/);
+    expect(text).toContain('规则：规则书规则');
+  });
+
   it('renders classic templates in DefaultEventHandler pipeline', async () => {
     const mockStore = new MockStateStore();
-    const renderer = new TemplateRenderer(createClassicTemplates());
+    const renderer = new TemplateRenderer(createZhCNTemplates());
     const handler = new DefaultEventHandler(
       mockStore,
       undefined,
@@ -148,6 +229,6 @@ describe('TemplateRenderer', () => {
     const reply = replies[0];
     expect(reply?.templateKey).toBe('dice.roll');
     expect(reply?.variantId).toBeDefined();
-    expect(reply?.text).toMatch(/掷骰: 1d100\+2d6 = \[\d+\] \+ \[\d+, \d+\] = \d+/);
+    expect(reply?.text).toMatch(/张三 掷骰: 1d100\+2d6 = \[\d+\] \+ \[\d+, \d+\] = \d+/);
   });
 });

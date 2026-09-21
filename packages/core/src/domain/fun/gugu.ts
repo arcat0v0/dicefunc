@@ -124,16 +124,11 @@ export const GUGU_ENTRIES: readonly GuguEntry[] = [
   },
 ];
 
-export async function getRandomGugu(
-  random: RandomSource,
-  actorName: string,
-  showAuthor = false,
-): Promise<string> {
+export async function getRandomGugu(random: RandomSource): Promise<GuguEntry> {
   const index = await random.integer(0, GUGU_ENTRIES.length - 1);
   const entry = GUGU_ENTRIES[index] ?? GUGU_ENTRIES[0];
-  const text = entry ? entry.template.replaceAll('{$t玩家}', actorName) : '咕咕咕~';
-  if (showAuthor && entry) {
-    return `🕊️: ${text}\n    ——${entry.author}`;
+  if (!entry) {
+    throw new Error('Gugu catalog is empty');
   }
-  return `🕊️: ${text}`;
+  return entry;
 }

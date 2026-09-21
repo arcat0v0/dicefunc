@@ -493,6 +493,9 @@ describe('DND5e Commands (.init, .hp, .ss, .longrest)', () => {
         },
       ],
     });
+    expect(advantage.replies[0]?.text).toBe(
+      '游侠进行「运动」检定：2D20(8,17)取17 + 7 + 3 = 27，DC 15，通过\n原因：撞门',
+    );
 
     const repeated = await executor.execute(
       createTestEvent('.ra 2# 力量'),
@@ -555,6 +558,9 @@ describe('DND5e Commands (.init, .hp, .ss, .longrest)', () => {
         }),
       },
     });
+    expect(applied.replies[0]?.text).toBe(
+      ['「战士」的临时加值已更新：', '力量：2', '运动：1', '运动熟练：1'].join('\n'),
+    );
 
     const buffedSheet = createCharacterSheet({
       id: 'sheet_buffs',
@@ -585,6 +591,9 @@ describe('DND5e Commands (.init, .hp, .ss, .longrest)', () => {
         attributes: expect.not.objectContaining({ Buff_力量: expect.any(Number) }),
       },
     });
+    expect(cleared.replies[0]?.text).toBe(
+      '「战士」的临时加值已更新：\n已移除：力量、运动、运动熟练',
+    );
   });
 
   it('supports batch spell slots, casting, restoration, and clearing', async () => {
@@ -608,6 +617,9 @@ describe('DND5e Commands (.init, .hp, .ss, .longrest)', () => {
         }),
       },
     });
+    expect(initialized.replies[0]?.text).toBe(
+      '「法师」已初始化法术位：1环 4/4，2环 3/3，3环 2/2。',
+    );
 
     const slotSheet = createCharacterSheet({
       id: 'sheet_slots',
@@ -644,6 +656,13 @@ describe('DND5e Commands (.init, .hp, .ss, .longrest)', () => {
         attributes: expect.objectContaining({ 法术位_1_已用: 0, 法术位_2_已用: 0 }),
       },
     });
+    expect(restored.replies[0]?.text).toBe('「法师」已恢复法术位：1环 4/4，2环 3/3。');
+
+    const changed = await executor.execute(
+      createTestEvent('.ss 1环-1'),
+      createTestDndContext({}, { sheet: slotSheet }),
+    );
+    expect(changed.replies[0]?.text).toBe('「法师」的法术位已变更：1环 -1，剩余 1/4。');
 
     const rested = await executor.execute(
       createTestEvent('.长休'),

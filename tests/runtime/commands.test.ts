@@ -5,7 +5,10 @@ import {
   CommandExecutor,
   type ConversationSession,
   DefaultCommandRegistry,
+  DefaultMessageCatalog,
   type HiddenRollLinkReader,
+  type MessageCatalog,
+  type MessageKey,
   type RandomSource,
   type StateSnapshot,
   type VerifiedEvent,
@@ -16,6 +19,7 @@ import {
   createDefaultCommandRegistry,
   createWebCryptoRandomSource,
   systemClock,
+  zhCNMessages,
 } from '@dicefunc/core';
 import { describe, expect, it } from 'vitest';
 
@@ -24,6 +28,7 @@ function createTestContext(
   snapshotOverrides: Partial<StateSnapshot> = {},
   hiddenRollLinks?: HiddenRollLinkReader,
   random: RandomSource = createWebCryptoRandomSource(),
+  messageCatalog?: MessageCatalog,
 ): CommandContext {
   const baseConversation = createConversationSession({
     id: 'conv_test_1',
@@ -73,6 +78,7 @@ function createTestContext(
     configVersion: '1.0.0',
     botId: 'bot_test_1',
     ...(hiddenRollLinks ? { hiddenRollLinks } : {}),
+    ...(messageCatalog ? { messageCatalog } : {}),
   };
 }
 
@@ -170,6 +176,42 @@ describe('CommandRegistry conflict detection', () => {
   });
 });
 
+describe('Message catalog command integration', () => {
+  it('renders command replies with the injected catalog', async () => {
+    const catalog = new DefaultMessageCatalog({
+      ...zhCNMessages,
+      'system.command_not_found': 'CUSTOM {command}',
+    });
+    const decision = await new CommandExecutor().execute(
+      createTestEvent('.missing'),
+      createTestContext({}, {}, undefined, createWebCryptoRandomSource(), catalog),
+    );
+
+    expect(decision.replies[0]?.text).toBe('CUSTOM missing');
+  });
+
+  it('rejects missing interpolation values', () => {
+    const catalog = new DefaultMessageCatalog(zhCNMessages);
+
+    expect(() => catalog.format('system.command_not_found')).toThrow(
+      'Missing message value: system.command_not_found.command',
+    );
+  });
+
+  it('keeps every default message nonempty and renderable', () => {
+    const catalog = new DefaultMessageCatalog(zhCNMessages);
+
+    for (const [key, template] of Object.entries(zhCNMessages) as [MessageKey, string][]) {
+      const values = Object.fromEntries(
+        [...template.matchAll(/\{([a-zA-Z0-9_]+)\}/gu)].map((match) => [match[1], 'value']),
+      );
+
+      expect(template.length).toBeGreaterThan(0);
+      expect(catalog.format(key, values)).not.toMatch(/\{[a-zA-Z0-9_]+\}/u);
+    }
+  });
+});
+
 describe('Conversation settings updates with set and bot commands', () => {
   const executor = new CommandExecutor();
 
@@ -236,11 +278,11 @@ describe('Conversation settings updates with set and bot commands', () => {
 
     const botDecision = await executor.execute(createTestEvent('.bot off'), nonHostCtx);
     expect(botDecision.updates).toHaveLength(0);
-    expect(botDecision.replies[0]?.text).toBe('This command requires Group Host permission.');
+    expect(botDecision.replies[0]?.text).toBe('此指令仅限群主使用。');
 
     const setDecision = await executor.execute(createTestEvent('.set sides 20'), nonHostCtx);
     expect(setDecision.updates).toHaveLength(0);
-    expect(setDecision.replies[0]?.text).toBe('This command requires Group Host permission.');
+    expect(setDecision.replies[0]?.text).toBe('此指令仅限群主使用。');
   });
 });
 
@@ -1051,6 +1093,37 @@ describe('Check commands (.ra / .rc)', () => {
     expect(decision.replies[0]?.text).toContain('75');
   });
 
+  it('reports actor, roll, target, requirement, outcome, and rule without inventing a fumble', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_strength',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '调查员',
+      attributes: { 力量: 55 },
+    });
+    const decision = await executor.execute(
+      createTestEvent('。ra力量'),
+      createTestContext({}, { sheet }, undefined, sequenceRandom([62])),
+    );
+
+    expect(decision.results[0]?.data).toMatchObject({
+      actor: '调查员',
+      level: 'failure',
+      roll: { total: 62, values: [62] },
+      target: { value: 55, base: 55 },
+    });
+    expect(decision.replies[0]?.text).toBe(
+      [
+        '调查员进行「力量」检定',
+        '骰点：D100 = 62',
+        '目标值：55',
+        '要求：常规成功',
+        '结果：失败（未通过）',
+        '规则：规则书规则',
+      ].join('\n'),
+    );
+  });
+
   it('performs DND5e check when conversation ruleSet is dnd5e', async () => {
     const sheet = createCharacterSheet({
       id: 'sheet_dnd',
@@ -1725,7 +1798,7 @@ describe('Set command loose syntax (.set)', () => {
     if (update?.type === 'conversation-settings') {
       expect(update.changes.diceSides).toBe(20);
     }
-    expect(decision.replies[0]?.text).toContain('Default dice sides set to 20');
+    expect(decision.replies[0]?.text).toContain('默认骰面已设为 20');
   });
 
   it('sets rule set with single keyword .set dnd', async () => {
@@ -1738,7 +1811,7 @@ describe('Set command loose syntax (.set)', () => {
     if (update?.type === 'conversation-settings') {
       expect(update.changes.ruleSet).toBe('dnd5e');
     }
-    expect(decision.replies[0]?.text).toContain('Rule set changed to dnd5e');
+    expect(decision.replies[0]?.text).toContain('当前规则已切换为 DND5E');
   });
 
   it('resets dice sides on .set clr', async () => {
@@ -1751,7 +1824,7 @@ describe('Set command loose syntax (.set)', () => {
     if (update?.type === 'conversation-settings') {
       expect(update.changes.diceSides).toBe(100);
     }
-    expect(decision.replies[0]?.text).toContain('Default dice sides reset to 100');
+    expect(decision.replies[0]?.text).toContain('默认骰面已恢复为 100');
   });
 });
 
@@ -2011,16 +2084,16 @@ describe('Entertainment and utility commands (.jrrp / .gugu / .name / .namednd /
   });
 
   it('generates excuse on .gugu and includes author with 来源', async () => {
-    const ctx = createTestContext();
+    const ctx = createTestContext({}, {}, undefined, sequenceRandom([0, 0]));
     const decision = await executor.execute(createTestEvent('.gugu'), ctx);
 
     expect(decision.results).toHaveLength(1);
     expect(decision.results[0]?.kind).toBe('fun.gugu');
     expect(decision.replies).toHaveLength(1);
-    expect(decision.replies[0]?.text).toContain('🕊️:');
+    expect(decision.replies[0]?.text).not.toContain('鹊鹊结合实际经历创作');
 
     const decisionAuthor = await executor.execute(createTestEvent('.gugu 来源'), ctx);
-    expect(decisionAuthor.replies[0]?.text).toContain('——');
+    expect(decisionAuthor.replies[0]?.text).toContain('鹊鹊结合实际经历创作');
   });
 
   it('generates random names on .name', async () => {
@@ -2555,6 +2628,15 @@ describe('COC7 daily command compatibility', () => {
       right: { skill: '潜行', target: 55, roll: 30 },
       winner: 'left',
     });
+    expect(decision.replies[0]?.text).toBe(
+      [
+        '调查员进行对抗检定',
+        '侦查：D100 = 40 / 65，常规成功',
+        '潜行：D100 = 30 / 55，常规成功',
+        '结果：侦查胜出（成功等级相同，目标值较高）',
+        '规则：规则书规则',
+      ].join('\n'),
+    );
   });
 
   it('supports SAN bonus dice, explicit rolls, cap, half, and fumble loss', async () => {
@@ -2569,6 +2651,13 @@ describe('COC7 daily command compatibility', () => {
       cap: 2,
       half: true,
     });
+    expect(adjusted.replies[0]?.text).toContain('调查员进行理智检定');
+    expect(adjusted.replies[0]?.text).toContain('骰点：奖励骰 1 个，候选 90、80，取 80');
+    expect(adjusted.replies[0]?.text).toContain('目标值：60');
+    expect(adjusted.replies[0]?.text).toContain('结果：失败（未通过）');
+    expect(adjusted.replies[0]?.text).toContain('损失：1d6 = 6，调整后 2');
+    expect(adjusted.replies[0]?.text).toContain('SAN：60 → 58');
+    expect(adjusted.replies[0]?.text).toContain('规则：规则书规则');
 
     const explicit = await executor.execute(
       createTestEvent('.sc 50 1/1d6'),

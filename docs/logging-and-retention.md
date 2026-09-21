@@ -38,7 +38,7 @@
 ### 2. 跑团正文与归档日志 (StoryLog & Archive)
 
 - **内容**: 服务实际收到的用户消息与实际发送的机器人回复；启停指令边界与 SealDice 一致；
-- **机器人昵称**: 出站记录使用 `config/flavors/classic/replies/core.yaml` 中的 `bot.name` 文案，缺失时默认为 `Dicefunc`；
+- **机器人昵称**: 出站记录使用 `packages/core/src/messages/zh-CN/core.ts` 中的 `bot.display_name` 文案，当前默认值为 `Dicefunc`；
 - **存储**: Cloudflare D1（正文暂存与元数据索引）+ Cloudflare R2（不可变 SealDice TXT 分片与归档清单）；
 - **保留期**: 由 `config/logging.yaml` 的 `archiveRetentionDays` 决定（默认永久保留）；
 - **访问控制**: 当前仅群主或骰主可签发短时下载授权。
