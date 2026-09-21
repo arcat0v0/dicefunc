@@ -9,7 +9,13 @@ import {
   createDeckSession,
   drawFromDeck,
 } from '../domain/deck/deck.js';
-import { type AstNode, collectDiceBudget, evaluateAst } from '../domain/dice/ast.js';
+import {
+  type AstNode,
+  UnresolvedVariableError,
+  collectDiceBudget,
+  evaluateAst,
+  resolveAstVariables,
+} from '../domain/dice/ast.js';
 import { applyKeepDrop, rollDice } from '../domain/dice/expression.js';
 import { parseDiceExpression } from '../domain/dice/parser.js';
 import { getRandomGugu } from '../domain/fun/gugu.js';
@@ -21,7 +27,11 @@ import {
   hashHiddenRollLinkToken,
   isHiddenRollLinkToken,
 } from '../domain/hidden-roll/binding.js';
-import { type Coc7CardAttributes, generateCoc7Card } from '../domain/rules/coc7/character-gen.js';
+import {
+  type Coc7CardAttributes,
+  calculateCoc7DamageBonus,
+  generateCoc7Card,
+} from '../domain/rules/coc7/character-gen.js';
 import { performCocCheck } from '../domain/rules/coc7/check.js';
 import { cocSuccessRank, parseCocCheckArgs } from '../domain/rules/coc7/command.js';
 import {
@@ -289,6 +299,52 @@ async function evaluateNumericExpression(
   return (await evaluateAst(expression.ast, random)).value;
 }
 
+function findCharacterAttribute(
+  ruleSet: string,
+  attributes: Readonly<Record<string, number>>,
+  requestedName: string,
+): number | undefined {
+  const normalizedName = normalizeAttributeName(ruleSet, requestedName);
+  const directValue = attributes[normalizedName] ?? attributes[requestedName];
+  if (directValue !== undefined) {
+    return directValue;
+  }
+  for (const [storedName, value] of Object.entries(attributes)) {
+    if (normalizeAttributeName(ruleSet, storedName) === normalizedName) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function resolveRollVariable(name: string, context: CommandContext): AstNode | undefined {
+  const conversation = context.snapshot.conversation;
+  const attributes = context.snapshot.sheet?.attributes;
+  if (!attributes) {
+    return undefined;
+  }
+
+  const normalizedName = normalizeAttributeName(conversation.ruleSet, name);
+  const explicitValue = findCharacterAttribute(conversation.ruleSet, attributes, normalizedName);
+  if (explicitValue !== undefined) {
+    return { kind: 'number', value: explicitValue };
+  }
+
+  if (conversation.ruleSet === 'coc7' && normalizedName === 'DB') {
+    const strength = findCharacterAttribute(conversation.ruleSet, attributes, '力量');
+    const size = findCharacterAttribute(conversation.ruleSet, attributes, '体型');
+    if (strength === undefined || size === undefined) {
+      return undefined;
+    }
+    const damageBonus = calculateCoc7DamageBonus(strength, size);
+    return damageBonus.kind === 'constant'
+      ? { kind: 'number', value: damageBonus.value }
+      : { kind: 'dice', count: damageBonus.count, faces: damageBonus.faces };
+  }
+
+  return undefined;
+}
+
 async function rollHandler(input: CommandInput, context: CommandContext): Promise<CommandDecision> {
   let exprText =
     input.args.length > 0
@@ -306,7 +362,9 @@ async function rollHandler(input: CommandInput, context: CommandContext): Promis
     }
   }
 
-  const parseResult = parseDiceExpression(exprText, context.snapshot.conversation.diceSides);
+  const parseResult = parseDiceExpression(exprText, context.snapshot.conversation.diceSides, {
+    allowVariables: true,
+  });
 
   const deadline = new Date(input.timestamp.getTime() + 300_000);
 
@@ -331,7 +389,34 @@ async function rollHandler(input: CommandInput, context: CommandContext): Promis
   }
 
   const expr = parseResult.expression;
-  const { totalDice } = collectDiceBudget(expr.ast);
+  let resolvedAst: AstNode;
+  try {
+    resolvedAst = resolveAstVariables(expr.ast, (name) => resolveRollVariable(name, context));
+  } catch (error) {
+    if (!(error instanceof UnresolvedVariableError)) {
+      throw error;
+    }
+    const reply: PreparedReply = {
+      executionId: input.executionId,
+      part: 1,
+      msgSeq: 1,
+      scene: context.snapshot.conversation.scene,
+      targetId: context.snapshot.conversation.externalId,
+      originMessageId: input.messageId,
+      templateKey: 'dice.error',
+      text: formatMessage(context, 'dice.unresolved_variable', {
+        name: error.variableName,
+      }),
+      deadline,
+    };
+    return {
+      results: [],
+      updates: [],
+      replies: [reply],
+      logItems: [],
+    };
+  }
+  const { totalDice } = collectDiceBudget(resolvedAst);
   const totalRollsNeeded = totalDice * expr.repeat;
 
   if (context.budget.consumed.diceRolls + totalRollsNeeded > context.budget.maxDiceRolls) {
@@ -367,7 +452,7 @@ async function rollHandler(input: CommandInput, context: CommandContext): Promis
   }[] = [];
 
   for (let r = 0; r < expr.repeat; r++) {
-    const evalResult = await evaluateAst(expr.ast, context.random);
+    const evalResult = await evaluateAst(resolvedAst, context.random);
     const rolls = evalResult.diceGroups.flatMap((g) => g.rolls);
     const keptRolls = evalResult.diceGroups.flatMap((g) => g.keptRolls);
     repeatResults.push({

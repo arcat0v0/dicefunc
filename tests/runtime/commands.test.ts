@@ -1318,6 +1318,49 @@ describe('Roll command rd-alias compat parsing (.rd)', () => {
     expect(decision.replies).toHaveLength(1);
     expect(decision.replies[0]?.text).toContain('1d20');
   });
+
+  it('resolves COC7 DB from STR and SIZ in compact .rd expressions', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_1',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '初无',
+      attributes: { 力量: 55, 体型: 70 },
+    });
+    const ctx = createTestContext({}, { sheet }, undefined, sequenceRandom([11, 3]));
+    const decision = await executor.execute(createTestEvent('。rd20+db'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.replies[0]?.text).toBe('d20+db = [11] + [3] = 14');
+    expect(decision.results[0]?.data).toMatchObject({
+      expression: 'd20+db',
+      total: 14,
+      rolls: [11, 3],
+    });
+  });
+
+  it('resolves normalized character attributes in dice expressions', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_1',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '初无',
+      attributes: { 力量: 55 },
+    });
+    const ctx = createTestContext({}, { sheet }, undefined, sequenceRandom([42]));
+    const decision = await executor.execute(createTestEvent('.r d100+str'), ctx);
+
+    expect(decision.results).toHaveLength(1);
+    expect(decision.replies[0]?.text).toBe('d100+str = [42] + 55 = 97');
+  });
+
+  it('rejects unresolved character attributes before consuming randomness', async () => {
+    const ctx = createTestContext({}, {}, undefined, sequenceRandom([]));
+    const decision = await executor.execute(createTestEvent('。rd20+db'), ctx);
+
+    expect(decision.results).toHaveLength(0);
+    expect(decision.replies[0]?.text).toContain('db');
+  });
 });
 
 describe('Advantage and disadvantage dice suffixes', () => {

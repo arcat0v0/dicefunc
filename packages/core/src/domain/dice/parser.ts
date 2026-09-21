@@ -27,6 +27,10 @@ export interface ParseResult {
   readonly error?: string | undefined;
 }
 
+export interface ParseDiceExpressionOptions {
+  readonly allowVariables?: boolean | undefined;
+}
+
 enum Precedence {
   NONE = 0,
   ADD_SUB = 1,
@@ -38,6 +42,7 @@ enum Precedence {
 type Token =
   | { readonly type: 'number'; readonly value: number }
   | { readonly type: 'dice'; readonly node: DiceGroupNode }
+  | { readonly type: 'variable'; readonly name: string }
   | { readonly type: '+' | '-' | '*' | '/' | '%' | '^' | '(' | ')' }
   | { readonly type: 'eof' };
 
@@ -59,7 +64,7 @@ class Tokenizer {
     return this.pos;
   }
 
-  nextToken(): Token {
+  nextToken(allowVariable = false): Token {
     this.skipWhitespace();
     if (this.pos >= this.text.length) {
       return { type: 'eof' };
@@ -85,7 +90,12 @@ class Tokenizer {
     const diceMatch = remaining.match(
       /^(\d+)?([dD])(\d+)?(?:(kh|kl|dh|dl|k|q|优势|劣势|優勢|劣勢)(\d+)?)?/,
     );
-    if (diceMatch) {
+    const diceMatchEndsAtIdentifier =
+      diceMatch !== null &&
+      diceMatch[3] === undefined &&
+      diceMatch[4] === undefined &&
+      /^[\p{L}\p{N}_:]$/u.test(remaining[diceMatch[0].length] ?? '');
+    if (diceMatch && !diceMatchEndsAtIdentifier) {
       const countStr = diceMatch[1];
       const facesStr = diceMatch[3];
       const modStr = diceMatch[4];
@@ -158,6 +168,14 @@ class Tokenizer {
       return { type: 'number', value: Number.parseInt(numMatch[0], 10) };
     }
 
+    if (allowVariable) {
+      const variableMatch = remaining.match(/^[\p{L}_][\p{L}\p{N}_:]*/u);
+      if (variableMatch) {
+        this.pos += variableMatch[0].length;
+        return { type: 'variable', name: variableMatch[0] };
+      }
+    }
+
     return { type: 'eof' };
   }
 
@@ -176,8 +194,11 @@ class Tokenizer {
 class PrattParser {
   private currentToken: Token;
 
-  constructor(private readonly tokenizer: Tokenizer) {
-    this.currentToken = this.tokenizer.nextToken();
+  constructor(
+    private readonly tokenizer: Tokenizer,
+    private readonly allowVariables: boolean,
+  ) {
+    this.currentToken = this.tokenizer.nextToken(this.allowVariables);
   }
 
   parse(): AstNode {
@@ -210,18 +231,23 @@ class PrattParser {
       return token.node;
     }
 
-    if (token.type === '+') {
+    if (token.type === 'variable') {
       this.currentToken = this.tokenizer.nextToken();
+      return { kind: 'variable', name: token.name };
+    }
+
+    if (token.type === '+') {
+      this.currentToken = this.tokenizer.nextToken(this.allowVariables);
       return { kind: 'unary', op: '+', operand: this.parseExpression(Precedence.UNARY) };
     }
 
     if (token.type === '-') {
-      this.currentToken = this.tokenizer.nextToken();
+      this.currentToken = this.tokenizer.nextToken(this.allowVariables);
       return { kind: 'unary', op: '-', operand: this.parseExpression(Precedence.UNARY) };
     }
 
     if (token.type === '(') {
-      this.currentToken = this.tokenizer.nextToken();
+      this.currentToken = this.tokenizer.nextToken(this.allowVariables);
       const expr = this.parseExpression(Precedence.NONE);
       if (this.currentToken.type !== ')') {
         throw new Error('Unclosed parenthesis');
@@ -238,7 +264,7 @@ class PrattParser {
     const op = opToken.type as '+' | '-' | '*' | '/' | '%' | '^';
     const bp = this.getBindingPower(op);
 
-    this.currentToken = this.tokenizer.nextToken();
+    this.currentToken = this.tokenizer.nextToken(this.allowVariables);
 
     const rightBp = op === '^' ? ((bp - 1) as Precedence) : bp;
     const right = this.parseExpression(rightBp);
@@ -268,7 +294,11 @@ class PrattParser {
   }
 }
 
-export function parseDiceExpression(expression: string, defaultSides = 100): ParseResult {
+export function parseDiceExpression(
+  expression: string,
+  defaultSides = 100,
+  options: ParseDiceExpressionOptions = {},
+): ParseResult {
   const byteLength = new TextEncoder().encode(expression).length;
   if (byteLength > 2048) {
     throw new ExpressionBudgetError('Expression input exceeds 2KiB limit');
@@ -317,7 +347,7 @@ export function parseDiceExpression(expression: string, defaultSides = 100): Par
 
   try {
     const tokenizer = new Tokenizer(exprToParse, defaultSides);
-    const parser = new PrattParser(tokenizer);
+    const parser = new PrattParser(tokenizer, options.allowVariables ?? false);
     const ast = parser.parse();
 
     const remaining = tokenizer.getRemaining();
@@ -404,7 +434,11 @@ export function parseDiceExpression(expression: string, defaultSides = 100): Par
 }
 
 export class DiceParser {
-  parse(expression: string, defaultSides = 100): ParseResult {
-    return parseDiceExpression(expression, defaultSides);
+  parse(
+    expression: string,
+    defaultSides = 100,
+    options: ParseDiceExpressionOptions = {},
+  ): ParseResult {
+    return parseDiceExpression(expression, defaultSides, options);
   }
 }

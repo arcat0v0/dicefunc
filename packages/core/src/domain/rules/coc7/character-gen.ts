@@ -20,6 +20,40 @@ export interface Coc7CardAttributes {
   readonly totalWithLuck: number;
 }
 
+export type Coc7DamageBonus =
+  | {
+      readonly kind: 'constant';
+      readonly value: number;
+      readonly build: number;
+    }
+  | {
+      readonly kind: 'dice';
+      readonly count: number;
+      readonly faces: 4 | 6;
+      readonly build: number;
+    };
+
+export function calculateCoc7DamageBonus(strength: number, size: number): Coc7DamageBonus {
+  const total = strength + size;
+  if (total < 65) {
+    return { kind: 'constant', value: -2, build: -2 };
+  }
+  if (total < 85) {
+    return { kind: 'constant', value: -1, build: -1 };
+  }
+  if (total < 125) {
+    return { kind: 'constant', value: 0, build: 0 };
+  }
+  if (total < 165) {
+    return { kind: 'dice', count: 1, faces: 4, build: 1 };
+  }
+  if (total < 205) {
+    return { kind: 'dice', count: 1, faces: 6, build: 2 };
+  }
+  const count = Math.floor((total - 205) / 80) + 2;
+  return { kind: 'dice', count, faces: 6, build: count + 1 };
+}
+
 async function rollSum(random: RandomSource, count: number, sides: number): Promise<number> {
   let sum = 0;
   for (let i = 0; i < count; i++) {
@@ -44,28 +78,12 @@ export async function generateCoc7Card(random: RandomSource): Promise<Coc7CardAt
   const mp = Math.floor(pow / 5);
   const san = pow;
 
-  const sumStrSiz = str + siz;
-  let db = '0';
-  let bld = 0;
-  if (sumStrSiz < 65) {
-    db = '-2';
-    bld = -2;
-  } else if (sumStrSiz < 85) {
-    db = '-1';
-    bld = -1;
-  } else if (sumStrSiz < 125) {
-    db = '0';
-    bld = 0;
-  } else if (sumStrSiz < 165) {
-    db = '+1d4';
-    bld = 1;
-  } else if (sumStrSiz < 205) {
-    db = '+1d6';
-    bld = 2;
-  } else {
-    db = '+2d6';
-    bld = 3;
-  }
+  const damageBonus = calculateCoc7DamageBonus(str, siz);
+  const db =
+    damageBonus.kind === 'constant'
+      ? String(damageBonus.value)
+      : `+${damageBonus.count}d${damageBonus.faces}`;
+  const bld = damageBonus.build;
 
   let mov = 8;
   if (dex > siz && str > siz) {

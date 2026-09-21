@@ -92,7 +92,7 @@ export const HELP_BY_TOPIC: Readonly<Record<string, string>> = {
     '.draw .deck .log .find .modu .black',
     '.jrrp .gugu .who .ping .name .namednd',
   ].join('\n'),
-  r: '.r [表达式] [原因]\n省略表达式时使用当前默认骰面。',
+  r: '.r [表达式] [原因]\n表达式可引用当前角色卡属性；COC7 的 DB 可由力量与体型推导。省略表达式时使用当前默认骰面。',
   rh: '.rh [表达式] [原因]\n群聊暗骰需要先完成 .rhbind 绑定。',
   rhbind: '.rhbind [on|off]\n用于管理群成员与 C2C 身份的可信暗骰绑定。',
   ra: '.ra/rc <属性或技能> [目标值]\n未提供目标值时必须从当前角色卡读取。',

@@ -5,6 +5,13 @@ export class ExpressionBudgetError extends Error {
   }
 }
 
+export class UnresolvedVariableError extends Error {
+  constructor(readonly variableName: string) {
+    super(`Unresolved dice variable: ${variableName}`);
+    this.name = 'UnresolvedVariableError';
+  }
+}
+
 import type { RandomSource } from '../../ports/random-source.js';
 import { type DiceRollResult, type KeepDropType, applyKeepDrop } from './expression.js';
 
@@ -21,6 +28,11 @@ export interface NumberNode {
   readonly value: number;
 }
 
+export interface VariableNode {
+  readonly kind: 'variable';
+  readonly name: string;
+}
+
 export interface UnaryOpNode {
   readonly kind: 'unary';
   readonly op: '+' | '-';
@@ -34,12 +46,48 @@ export interface BinaryOpNode {
   readonly right: AstNode;
 }
 
-export type AstNode = DiceGroupNode | NumberNode | UnaryOpNode | BinaryOpNode;
+export type AstNode = DiceGroupNode | NumberNode | VariableNode | UnaryOpNode | BinaryOpNode;
 
 export interface AstEvaluationResult {
   readonly value: number;
   readonly rendered: string;
   readonly diceGroups: readonly DiceRollResult[];
+}
+
+export type AstVariableResolver = (name: string) => AstNode | undefined;
+
+export function resolveAstVariables(
+  node: AstNode,
+  resolver: AstVariableResolver,
+  maxDepth = 16,
+): AstNode {
+  function resolve(current: AstNode, stack: readonly string[]): AstNode {
+    switch (current.kind) {
+      case 'number':
+      case 'dice':
+        return current;
+      case 'variable': {
+        if (stack.length >= maxDepth || stack.includes(current.name)) {
+          throw new ExpressionBudgetError(`Variable expansion exceeded depth ${maxDepth}`);
+        }
+        const resolved = resolver(current.name);
+        if (!resolved) {
+          throw new UnresolvedVariableError(current.name);
+        }
+        return resolve(resolved, [...stack, current.name]);
+      }
+      case 'unary':
+        return { ...current, operand: resolve(current.operand, stack) };
+      case 'binary':
+        return {
+          ...current,
+          left: resolve(current.left, stack),
+          right: resolve(current.right, stack),
+        };
+    }
+  }
+
+  return resolve(node, []);
 }
 export async function evaluateAst(
   node: AstNode,
@@ -52,6 +100,8 @@ export async function evaluateAst(
         rendered: String(node.value),
         diceGroups: [],
       };
+    case 'variable':
+      throw new UnresolvedVariableError(node.name);
     case 'dice': {
       const rolls: number[] = [];
       for (let i = 0; i < node.count; i++) {
@@ -142,6 +192,8 @@ export function collectDiceBudget(
         }
         totalDice += n.count;
         diceGroups.push(n);
+        break;
+      case 'variable':
         break;
       case 'unary':
         traverse(n.operand);

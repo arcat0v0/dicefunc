@@ -1,6 +1,7 @@
 import {
   ExpressionBudgetError,
   applyKeepDrop,
+  calculateCoc7DamageBonus,
   createWebCryptoRandomSource,
   parseDiceExpression,
   rollDice,
@@ -115,10 +116,37 @@ describe('parseDiceExpression', () => {
     expect(nested.expression?.ast.kind).toBe('binary');
   });
 
+  it('parses character attribute identifiers only when explicitly enabled', () => {
+    expect(parseDiceExpression('d20+db').success).toBe(false);
+    const parsed = parseDiceExpression('d20+db', 100, { allowVariables: true });
+
+    expect(parsed.success).toBe(true);
+    expect(parsed.expression?.ast).toEqual({
+      kind: 'binary',
+      op: '+',
+      left: { kind: 'dice', count: 1, faces: 20 },
+      right: { kind: 'variable', name: 'db' },
+    });
+    expect(parsed.expression?.reason).toBeUndefined();
+  });
   it('throws ExpressionBudgetError when budget limits are exceeded', () => {
     expect(() => parseDiceExpression('101d6')).toThrow(ExpressionBudgetError);
     expect(() => parseDiceExpression('1d6 x11')).toThrow(ExpressionBudgetError);
     expect(() => parseDiceExpression('a'.repeat(2049))).toThrow(ExpressionBudgetError);
+  });
+});
+
+describe('calculateCoc7DamageBonus', () => {
+  it.each([
+    [32, 32, { kind: 'constant', value: -2, build: -2 }],
+    [30, 35, { kind: 'constant', value: -1, build: -1 }],
+    [40, 45, { kind: 'constant', value: 0, build: 0 }],
+    [55, 70, { kind: 'dice', count: 1, faces: 4, build: 1 }],
+    [75, 90, { kind: 'dice', count: 1, faces: 6, build: 2 }],
+    [100, 105, { kind: 'dice', count: 2, faces: 6, build: 3 }],
+    [140, 145, { kind: 'dice', count: 3, faces: 6, build: 4 }],
+  ] as const)('derives DB for STR %i and SIZ %i', (strength, size, expected) => {
+    expect(calculateCoc7DamageBonus(strength, size)).toEqual(expected);
   });
 });
 

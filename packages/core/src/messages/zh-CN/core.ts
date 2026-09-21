@@ -11,6 +11,7 @@ export const coreMessages = {
   'system.check.unsupported': '当前部署不提供 SealDice 官方实例防伪校验；此命令不会执行规则检定。',
   'system.help.result_item': '【{title}】\n{content}',
   'dice.invalid_expression': '骰点表达式无效。',
+  'dice.unresolved_variable': '角色卡无法解析骰点变量「{name}」，请先录入对应属性。',
   'dice.budget_exceeded': '本次骰点需要 {required} 次随机数，超过单次上限 {limit}。',
   'bot.display_name': 'Dicefunc',
   'dice.roll.compound': '{prefix}{expression} = {rendered} = {total}{reason}',
