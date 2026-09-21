@@ -1093,7 +1093,7 @@ describe('Check commands (.ra / .rc)', () => {
     expect(decision.replies[0]?.text).toContain('75');
   });
 
-  it('reports actor, roll, target, requirement, outcome, and rule without inventing a fumble', async () => {
+  it('reports actor, roll, target, requirement, and outcome without inventing a fumble', async () => {
     const sheet = createCharacterSheet({
       id: 'sheet_strength',
       ownerId: 'user_ext_1',
@@ -1119,7 +1119,31 @@ describe('Check commands (.ra / .rc)', () => {
         '目标值：55',
         '要求：常规成功',
         '结果：失败（未通过）',
-        '规则：规则书规则',
+      ].join('\n'),
+    );
+  });
+
+  it('includes house rule when non-default coc rule is configured', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_strength',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '调查员',
+      attributes: { 力量: 55 },
+    });
+    const decision = await executor.execute(
+      createTestEvent('。ra力量'),
+      createTestContext({ cocRule: '2' }, { sheet }, undefined, sequenceRandom([62])),
+    );
+
+    expect(decision.replies[0]?.text).toBe(
+      [
+        '调查员进行「力量」检定',
+        '骰点：D100 = 62',
+        '目标值：55',
+        '要求：常规成功',
+        '结果：失败（未通过）',
+        '规则：国内常用规则',
       ].join('\n'),
     );
   });
@@ -2634,7 +2658,29 @@ describe('COC7 daily command compatibility', () => {
         '侦查：D100 = 40 / 65，常规成功',
         '潜行：D100 = 30 / 55，常规成功',
         '结果：侦查胜出（成功等级相同，目标值较高）',
-        '规则：规则书规则',
+      ].join('\n'),
+    );
+  });
+  it('includes house rule in opposed checks when non-default coc rule is configured', async () => {
+    const sheet = createCharacterSheet({
+      id: 'sheet_opposed_rule',
+      ownerId: 'user_ext_1',
+      ruleSet: 'coc7',
+      name: '调查员',
+      attributes: { 侦查: 65, 潜行: 55 },
+    });
+    const decision = await executor.execute(
+      createTestEvent('.rav 侦查 潜行'),
+      createTestContext({ cocRule: '2' }, { sheet }, undefined, sequenceRandom([40, 30])),
+    );
+
+    expect(decision.replies[0]?.text).toBe(
+      [
+        '调查员进行对抗检定',
+        '侦查：D100 = 40 / 65，常规成功',
+        '潜行：D100 = 30 / 55，常规成功',
+        '结果：侦查胜出（成功等级相同，目标值较高）',
+        '规则：国内常用规则',
       ].join('\n'),
     );
   });
@@ -2657,7 +2703,7 @@ describe('COC7 daily command compatibility', () => {
     expect(adjusted.replies[0]?.text).toContain('结果：失败（未通过）');
     expect(adjusted.replies[0]?.text).toContain('损失：1d6 = 6，调整后 2');
     expect(adjusted.replies[0]?.text).toContain('SAN：60 → 58');
-    expect(adjusted.replies[0]?.text).toContain('规则：规则书规则');
+    expect(adjusted.replies[0]?.text).not.toContain('规则：');
 
     const explicit = await executor.execute(
       createTestEvent('.sc 50 1/1d6'),
@@ -2670,6 +2716,11 @@ describe('COC7 daily command compatibility', () => {
       createTestContext({}, { sheet }, undefined, sequenceRandom([100])),
     );
     expect(fumble.results[0]?.data).toMatchObject({ roll: 100, sanLoss: 6 });
+    const withRule = await executor.execute(
+      createTestEvent('.sc 50 1/1d6'),
+      createTestContext({ cocRule: '2' }, { sheet }, undefined, sequenceRandom([4])),
+    );
+    expect(withRule.replies[0]?.text).toContain('规则：国内常用规则');
   });
 
   it('advances multiple skills and applies separate failure and success increments', async () => {

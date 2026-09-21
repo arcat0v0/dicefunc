@@ -124,7 +124,6 @@ describe('TemplateRenderer', () => {
       '目标值：55',
       '要求：常规成功',
       '结果：失败（未通过）',
-      '规则：规则书规则',
     ].join('\n');
     const rendered = await renderer.render(
       'coc.check.failed',
@@ -191,7 +190,7 @@ describe('TemplateRenderer', () => {
     expect(text).toContain('目标值：55');
     expect(text).toContain('要求：常规成功');
     expect(text).toMatch(/结果：(大成功|极难成功|困难成功|常规成功|失败|大失败)/);
-    expect(text).toContain('规则：规则书规则');
+    expect(text).not.toContain('规则：');
   });
 
   it('renders classic templates in DefaultEventHandler pipeline', async () => {

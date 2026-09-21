@@ -2980,6 +2980,8 @@ async function checkHandler(
   const ruleName =
     resolveCocHouseRule(ruleId)?.name ??
     formatMessage(context, 'coc.check.rule_fallback', { ruleId });
+  const ruleText =
+    ruleId === '0' ? '' : formatMessage(context, 'coc.check.rule', { rule: ruleName });
   const items: Record<string, unknown>[] = [];
   const lines: string[] = [];
 
@@ -3052,7 +3054,7 @@ async function checkHandler(
         target: targetDetail,
         requirement: requirementLabel,
         result: resultDetail,
-        rule: ruleName,
+        rule: ruleText,
       }),
     );
   }
@@ -3329,6 +3331,8 @@ async function opposedCheckHandler(
   const ruleName =
     resolveCocHouseRule(ruleId)?.name ??
     formatMessage(context, 'coc.check.rule_fallback', { ruleId });
+  const ruleText =
+    ruleId === '0' ? '' : formatMessage(context, 'coc.opposed.rule', { rule: ruleName });
   const text = formatMessage(context, 'coc.opposed.summary', {
     actor: actorName,
     leftSkill,
@@ -3351,7 +3355,7 @@ async function opposedCheckHandler(
     ),
     winner: winnerText,
     resolution,
-    rule: ruleName,
+    rule: ruleText,
   });
   const decision = replyOnly(input, context, 'coc.opposed', text);
   return {
@@ -5383,6 +5387,7 @@ async function scHandler(input: CommandInput, context: CommandContext): Promise<
   const ruleName =
     resolveCocHouseRule(ruleId)?.name ??
     formatMessage(context, 'coc.check.rule_fallback', { ruleId });
+  const ruleText = ruleId === '0' ? '' : formatMessage(context, 'coc.sc.rule', { rule: ruleName });
   const text = formatMessage(context, 'coc.sc.summary', {
     actor: actorName,
     roll: rollDetail,
@@ -5399,7 +5404,7 @@ async function scHandler(input: CommandInput, context: CommandContext): Promise<
           threshold: dailyThreshold,
         })
       : '',
-    rule: ruleName,
+    rule: ruleText,
     madness: madness ? formatMessage(context, 'coc.sc.madness', { message: madness }) : '',
   });
 

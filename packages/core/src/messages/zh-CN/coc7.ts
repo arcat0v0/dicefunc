@@ -13,7 +13,8 @@ export const coc7Messages = {
   'coc.check.penalty': '惩罚骰',
   'coc.check.target_modified': '{base} {operator} {modifier} = {target}',
   'coc.check.block':
-    '{prefix}{actor}进行「{skill}」检定\n骰点：{roll}\n目标值：{target}\n要求：{requirement}\n结果：{result}\n规则：{rule}',
+    '{prefix}{actor}进行「{skill}」检定\n骰点：{roll}\n目标值：{target}\n要求：{requirement}\n结果：{result}{rule}',
+  'coc.check.rule': '\n规则：{rule}',
   'coc.check.reason': '\n原因：{reason}',
   'coc.hidden.binding_required': '尚未建立可信私聊绑定，暗中检定未执行。',
   'coc.hidden.group_sent': '暗中检定已完成，结果只发送到绑定私聊。',
@@ -30,7 +31,8 @@ export const coc7Messages = {
   'coc.opposed.winner': '{skill}胜出',
   'coc.opposed.tie': '平局',
   'coc.opposed.summary':
-    '{actor}进行对抗检定\n{leftSkill}：D100 = {leftRoll} / {leftTarget}，{leftOutcome}\n{rightSkill}：D100 = {rightRoll} / {rightTarget}，{rightOutcome}\n结果：{winner}（{resolution}）\n规则：{rule}',
+    '{actor}进行对抗检定\n{leftSkill}：D100 = {leftRoll} / {leftTarget}，{leftOutcome}\n{rightSkill}：D100 = {rightRoll} / {rightTarget}，{rightOutcome}\n结果：{winner}（{resolution}）{rule}',
+  'coc.opposed.rule': '\n规则：{rule}',
   'coc.sc.help':
     '理智检定格式：.sc [b|p][数量] [判定表达式] <成功损失>/<失败损失> [SAN] [--half] [--cap=上限]',
   'coc.sc.missing_loss': '缺少理智损失表达式。',
@@ -48,9 +50,10 @@ export const coc7Messages = {
   'coc.sc.loss_adjusted': '{expression} = {original}，调整后 {loss}（{adjustments}）',
   'coc.sc.loss': '{expression} = {loss}',
   'coc.sc.summary':
-    '{actor}进行理智检定\n骰点：{roll}\n目标值：{target}\n结果：{outcome}（{result}）\n损失：{loss}\nSAN：{oldSan} → {newSan}{persistence}\n{daily}规则：{rule}{madness}',
+    '{actor}进行理智检定\n骰点：{roll}\n目标值：{target}\n结果：{outcome}（{result}）\n损失：{loss}\nSAN：{oldSan} → {newSan}{persistence}{daily}{rule}{madness}',
   'coc.sc.not_persisted': '（未绑定角色卡，未写回）',
-  'coc.sc.daily': '当日累计损失：{loss} / 阈值 {threshold}\n',
+  'coc.sc.daily': '\n当日累计损失：{loss} / 阈值 {threshold}',
+  'coc.sc.rule': '\n规则：{rule}',
   'coc.sc.madness': '\n{message}',
   'coc.result.passed': '通过',
   'coc.result.failed': '未通过',
